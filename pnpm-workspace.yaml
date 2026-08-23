@@ -1,0 +1,9 @@
+# Standalone project: this file makes dsh-desktop-windowos its own workspace root so a
+# parent harness checkout never claims this app as a workspace member — a
+# nested pnpm-workspace.yaml is what stops `pnpm install` here from resolving
+# upward into the parent repo.
+packages: []
+
+# vite 依赖 esbuild 的 postinstall(平台二进制); pnpm 11 只运行这里白名单的构建脚本。
+onlyBuiltDependencies:
+  - esbuild

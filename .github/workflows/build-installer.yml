@@ -1,0 +1,84 @@
+name: build dsh-local-shell installer
+
+# 自动链第 2 段: 构建自包含 GUI 安装器并发布到 Releases v2.0.0。
+# 壳 exe 从 Release v2.0.0 获取(容器构建会先把壳发布出来; 若尚未就绪则
+# 轮询等待 shell workflow 完成), 全程无需手动介入。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - 'installer/**'
+      - '.github/workflows/build-installer.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: wait for shell release then fetch dsh-local-shell.exe (auto chain)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 1) 若 Release 已有壳, 直接用
+          if gh release download v2.0.0 --repo "$GITHUB_REPOSITORY" \
+               --pattern "dsh-local-shell.exe" --dir . --clobber 2>/dev/null && [ -f dsh-local-shell.exe ]; then
+            echo "shell exe already in release"
+          else
+            # 2) 否则等待 shell workflow 完成并发布(自动链)
+            echo "shell release not ready; waiting for the shell workflow..."
+            for i in $(seq 1 90); do
+              out=$(gh run list --repo "$GITHUB_REPOSITORY" --limit 50 \
+                    --json databaseId,conclusion,name \
+                    --jq '[.[]|select(.name=="build dsh-local-shell (shell)" and .status=="completed")][0].conclusion' 2>/dev/null || true)
+              if [ -f dsh-local-shell.exe ] || { gh release download v2.0.0 --repo "$GITHUB_REPOSITORY" --pattern "dsh-local-shell.exe" --dir . --clobber 2>/dev/null && [ -f dsh-local-shell.exe ]; }; then
+                echo "shell exe fetched"
+                break
+              fi
+              if [ "$out" = "failure" ] || [ "$out" = "cancelled" ]; then
+                echo "shell workflow ended with $out"
+                exit 1
+              fi
+              sleep 10
+            done
+          fi
+          test -f dsh-local-shell.exe || { echo "failed to obtain dsh-local-shell.exe"; exit 1; }
+          mkdir -p installer/assets
+          mv dsh-local-shell.exe installer/assets/dsh-local-shell.exe
+          ls -la installer/assets
+
+      - name: install mingw-w64 toolchain
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+
+      - name: build installer exe
+        shell: bash
+        run: |
+          cd installer
+          x86_64-w64-mingw32-windres resource.rc -O coff -o resource.o
+          x86_64-w64-mingw32-gcc -municode -O2 -s -mwindows installer.c resource.o -o ../dsh-local-shell-install.exe -lcomctl32 -lshell32 -lole32 -luser32 -lgdi32
+          ls -la ../dsh-local-shell-install.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-local-shell-install
+          path: dsh-local-shell-install.exe
+          if-no-files-found: error
+
+      - name: publish installer exe to Releases v2.0.0 (auto chain)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in $(seq 1 60); do
+            if gh release view v2.0.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release upload v2.0.0 dsh-local-shell-install.exe --repo "$GITHUB_REPOSITORY" --clobber
+              break
+            fi
+            sleep 10
+          done

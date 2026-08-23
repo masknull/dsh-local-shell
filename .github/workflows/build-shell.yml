@@ -1,0 +1,68 @@
+name: build dsh-local-shell (shell)
+
+# 自动链第 1 段: 构建主程序并发布到 Releases v2.0.0。
+# 触发: 壳/前端/构建配置变更。产物自动上传 Release 的 dsh-local-shell.exe。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.npmrc'
+      - '.github/workflows/build-shell.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: pnpm install
+        run: pnpm install --no-frozen-lockfile --config.dangerously-allow-all-builds=true
+
+      - name: build shell exe (tauri release)
+        run: pnpm tauri build --no-bundle
+
+      - name: stage artifact as dsh-local-shell.exe
+        shell: pwsh
+        run: |
+          Copy-Item "src-tauri\target\release\dsh-desktop-windowos.exe" "dsh-local-shell.exe" -Force
+          Get-Item "dsh-local-shell.exe" | Select-Object Name, Length | Format-Table -AutoSize
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-local-shell
+          path: dsh-local-shell.exe
+          if-no-files-found: error
+
+      - name: publish shell exe to Releases v2.0.0 (auto chain)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v2.0.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v2.0.0 dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create v2.0.0 dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" \
+              --title "dsh-local-shell v2.0.0" \
+              --notes "DeepSeek Harness local shell (auto-built)" || gh release upload v2.0.0 dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" --clobber
+          fi
