@@ -72,3 +72,47 @@ pub(crate) const MENU_SCRIPT: &str = r#"
   window.addEventListener('resize', closeMenu);
 })();
 "#;
+
+/// GitHub 请求加速镜像注入: 插件常请求 github.com / raw.githubusercontent.com /
+/// api.github.com 等文件与仓库资源, 国内直连易失败。本脚本在每帧注入,
+/// 把 fetch / XMLHttpRequest 中的 GitHub URL 重写为 `https://gh-proxy.com/<原URL>`
+/// (GitHub 加速镜像前缀), 本地(3080/127.0.0.1)请求不受影响。
+pub(crate) const GH_MIRROR_SCRIPT: &str = r#"
+(() => {
+  if (window.__dsh_gh_mirror) return;
+  window.__dsh_gh_mirror = true;
+  var MIRROR = 'https://gh-proxy.com/';
+  var PREFIXES = [
+    'https://github.com/',
+    'https://raw.githubusercontent.com/',
+    'https://api.github.com/',
+    'https://gist.githubusercontent.com/',
+    'https://codeload.github.com/',
+    'https://objects.githubusercontent.com/'
+  ];
+  var mirrorize = function (u) {
+    if (typeof u !== 'string' || u.indexOf('://') < 0) return u;
+    for (var i = 0; i < PREFIXES.length; i++) {
+      if (u.indexOf(PREFIXES[i]) === 0) return MIRROR + u;
+    }
+    return u;
+  };
+  try {
+    var of = window.fetch ? window.fetch.bind(window) : null;
+    if (of) {
+      window.fetch = function (input, init) {
+        if (typeof input === 'string') input = mirrorize(input);
+        else if (input && input.url) input = new Request(mirrorize(input.url), input);
+        return of(input, init);
+      };
+    }
+  } catch (e) { /* ignore */ }
+  try {
+    var ox = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      arguments[1] = mirrorize(String(url));
+      return ox.apply(this, arguments);
+    };
+  } catch (e) { /* ignore */ }
+})();
+"#;

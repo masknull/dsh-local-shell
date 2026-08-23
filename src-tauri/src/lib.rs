@@ -337,6 +337,9 @@ pub fn run() {    tauri::Builder::default()
             // `location.origin === 'http://127.0.0.1:3080'` so it installs the
             // link context menu exactly inside the webchat iframe.
             .initialization_script(menu::MENU_SCRIPT)
+            // GitHub 加速镜像(gh-proxy)注入: 插件对 github 的 fetch/XHR 请求
+            // 自动重写为 https://gh-proxy.com/<原URL> (本地 3080 请求不受影响)
+            .initialization_script(menu::GH_MIRROR_SCRIPT)
             // WebView2's default drag-drop handler swallows file drops before
             // the page sees them, so HTML5 drag-and-drop (image attachments)
             // only works with the handler disabled — the tauri-documented
