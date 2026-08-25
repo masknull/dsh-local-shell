@@ -282,7 +282,17 @@ pub fn run() {    tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
-        .plugin(tauri_plugin_opener::init())
+        // opener 插件: 显式关闭它的 JS 侧链接点击拦截(open_js_links_on_click: false)。
+        // 该拦截会在 window 冒泡阶段抢走左键/Ctrl+点击的 `target="_blank"` 外链并改道到
+        // JS 侧 `plugin:opener|open_url` IPC, 而 3080 远程页面里没有可靠的 Tauri IPC 桥,
+        // 导致左键/Ctrl+点击两头落空(原生 new-window 被 preventDefault 压掉, IPC 又不通)。
+        // 关闭后左键/Ctrl+点击回到原生 NewWindowRequested → 本窗口 .on_new_window → 系统浏览器,
+        // 与右键同一条已验证可靠的通道(menu.rs 还会显式把这类点击接管为 window.open 兜底)。
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .manage(dsh::DshState::new())
         .invoke_handler(tauri::generate_handler![dsh_retry, dsh_download, dsh_custom_path, dsh_install_npm, dsh_npm_probe, env_info, open_path, log_tail, diagnostic_export, dsh_restart_backend, app_full_restart, dsh_exit, window_minimize, window_toggle_maximize, window_close, window_start_drag, window_is_maximized])
         .setup(|app| {

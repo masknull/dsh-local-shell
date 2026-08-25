@@ -1,7 +1,7 @@
 {
   "name": "dsh-local-shell",
   "description": "DeepSeek Harness local browser shell (WebView2 window around the local webchat; spawns/attaches dsh web).",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "type": "module",
   "private": true,
   "license": "MIT",

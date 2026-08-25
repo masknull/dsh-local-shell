@@ -2,26 +2,17 @@
 
 **[中文](#中文) | [En](#english)**
 
-> ## ⚠️ 本分支 = 本地魔改版 v2.0.0（dsh-local-shell）
-> 基于 RAFOLIE/dsh-desktop-windowos v1.6.8 魔改的「本地浏览器壳」，核心行为差异：
-> 1. **就绪探测放宽**：HTTP 有响应即视为 DSH 在跑（兼容 dsh-remote 登录墙：401/403 也算，附加模式不再被锁死）
-> 2. **设置/日志写 exe 旁 `dsh-shell-data`**（env `DSH_SHELL_DATA` 可覆盖）；WebView2 的 cookie/登录态由 Tauri 固定落在 `%LOCALAPPDATA%\com.dsh.desktop\EBWebView`（登录 dsh-remote 一次即持久记住，之后免登录）
-> 3. **DSH_HOME 感知**：profile 路径/自愈/修复全部跟随 `$DSH_HOME`（如 `D:\.dsh`），不再硬编码 `~/.dsh`
-> 4. **禁用自更新与插件同步**，托盘去掉「检查前端更新」——不会把 exe 覆盖成原作者版本，也不会动你的 DSH 配置
-> 5. 壳不杀 DSH：关窗口只退出壳，DSH 服务继续跑（下次打开自动附加）
+> 本仓库为 **dsh-local-shell**，基于 [RAFOLIE/dsh-desktop-windowos](https://github.com/RAFOLIE/dsh-desktop-windowos)（v1.6.8，MIT）魔改的 DeepSeek Harness 本地浏览器壳。与上游的差异：
 >
-> ### 构建与使用（纯 exe + 快捷方式，无插件）
-> 1. 推到 GitHub：`gh repo create <name> --public --source . --push`（**推荐用 bot 账号推送**），Actions 自动跑 [`.github/workflows/build-shell.yml`](.github/workflows/build-shell.yml)；在 Actions 页下载 Artifact `dsh-local-shell.exe`（单文件约 5MB）
-> 2. **安装**：把 `dsh-local-shell.exe` 与 `scripts\install-dsh-shell.cmd` 放同一目录,双击 cmd → 选「安装」（**纯 cmd 安装器，无任何 .ps1 脚本**）。安装器会自动探测 DSH 安装根（解析 `where dsh` 的 shim 得到 `D:\Program Files\deepseek-harness` 这类根），把 exe 复制到 `<DSH安装根>\dsh-desktop-local\` 并创建桌面快捷方式「DeepSeek Harness」
-> 3. **卸载**：再次双击 cmd 自动进入卸载模式。可选手动保留还是删除本软件数据（WebView2 cookie/日志，仅限 `%LOCALAPPDATA%\com.dsh.desktop` 与安装目录 `dsh-shell-data`），**绝不会触碰 DSH 自身配置**（`$DSH_HOME` / `D:\.dsh`）
-> 4. 双击桌面「DeepSeek Harness」：DSH 未运行时自动 `dsh web --no-open` 并等待就绪；已运行则直接附加
-> 5. 首次打开若遇到 dsh-remote 登录页，登录一次即可，登录态由 WebView2 持久化（`%LOCALAPPDATA%\com.dsh.desktop\EBWebView`）
+> 1. **就绪探测放宽**：HTTP 有响应即视为 DSH 在跑（兼容 dsh-remote 登录墙，附加模式不被锁死）
+> 2. **设置/日志写 exe 旁 `dsh-shell-data`**（`DSH_SHELL_DATA` 可覆盖）；WebView2 cookie/登录态落 `%LOCALAPPDATA%\com.dsh.desktop\EBWebView`（登录 dsh-remote 一次即持久）
+> 3. **DSH_HOME 感知**：profile 路径/自愈跟随 `$DSH_HOME`（如 `D:\.dsh`），不硬编码 `~/.dsh`
+> 4. **壳不自更新、不同步插件**：不会把 exe 覆盖成上游版本、不动你的 DSH 配置；托盘保留手动「检查更新(DSH)」用于更新 DSH 本体
+> 5. **壳不杀 DSH**：关窗口只退出壳，DSH 服务继续跑（下次打开自动附加）
 >
-> ---
+> 构建与发布走 GitHub Actions（[build-shell.yml](.github/workflows/build-shell.yml) → shell exe + [build-installer.yml](.github/workflows/build-installer.yml) → 自包含 GUI 安装器），产物发布到 Releases。
 >
-> ## 版权与致谢
-> 本仓库为 **dsh-local-shell v2.0.0**，代码改自 [RAFOLIE/dsh-desktop-windowos](https://github.com/RAFOLIE/dsh-desktop-windowos)（v1.6.8，MIT），原作者 RAFOLIE。
-> 界面与图标沿用原项目；本改版修改了启动/探测/数据目录/更新策略（见上），并新增 GitHub Actions 构建与纯 cmd 安装器。
+> 界面与图标沿用原项目，感谢原作者 RAFOLIE。
 
 <p align="center">
   <img src="docs/screenshot-v2.png" alt="DSH Desktop — native webchat in the shell window" width="860">

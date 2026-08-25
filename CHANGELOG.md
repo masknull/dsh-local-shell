@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.0.2 — 2026-08-25
+
+修复:**左键/Ctrl+点击 `target="_blank"` 外链无法打开系统浏览器**(右键「在新窗口打开」正常)。
+
+- 根因(实锤):v2.0.0 起注册的 `tauri-plugin-opener` 默认注入链接点击拦截脚本(`init-iife.js`,`open_js_links_on_click`),它在 `window` **冒泡阶段**抢走 `target="_blank"` 及 Ctrl/Shift+点击,`preventDefault()` 压掉页面原生新窗口后改走 **JS 侧** `plugin:opener|open_url` IPC——而 3080 这个外部远程页面里没有可靠的 Tauri IPC 桥,两头落空,点击静默无反应
+- 回归来源:上游 v1.2.1 起左键外链本经 Rust `.on_new_window`(原生 NewWindowRequested)正常打开系统浏览器;v2.0.0 引入 opener 插件后被其 JS 拦截抢占才坏掉。右键菜单走 `window.open`,绕过该 JS 拦截,所以一直正常
+- 修复①:`lib.rs` 改用 `tauri_plugin_opener::Builder::new().open_js_links_on_click(false)` 注册插件,**关闭 JS 点击拦截**,左键/Ctrl+点击回归 v1.2.1 的原生 `.on_new_window` → 系统浏览器通道(插件的 open_url/open_path 等 Rust 能力不受影响)
+- 修复②:`menu.rs` 新增**捕获阶段** click 处理器兜底——命中 `target="_blank"`(或 Ctrl/Shift+点击)的 http/https 外链时 `preventDefault` + 显式 `window.open(url,'_blank','noopener')`,与右键同一条已验证可靠的 native 通道;两条修复互为冗余,任一生效即可打开
+
+Fix: left-click / Ctrl+click on `target="_blank"` external links did nothing (right-click "open in new window" worked).
+
+- Root cause (confirmed): since v2.0.0 the registered `tauri-plugin-opener` injects its link-click interceptor (`init-iife.js`, `open_js_links_on_click`), which catches `target="_blank"` and Ctrl/Shift+clicks at the **bubble phase**, suppresses the page's native new-window via `preventDefault()`, and reroutes to the JS-side `plugin:opener|open_url` IPC — unreachable on the remote 3080 page (no working Tauri IPC bridge there), so both paths died silently
+- Regression origin: upstream v1.2.1 opened left-clicked external links fine via Rust `.on_new_window` (native NewWindowRequested); v2.0.0's opener plugin stole those clicks with its JS interception. The context menu uses `window.open`, bypassing it, hence it always worked
+- Fix 1: `lib.rs` registers the plugin via `tauri_plugin_opener::Builder::new().open_js_links_on_click(false)` — the JS click interception is gone and left-click/Ctrl+click return to the v1.2.1 native `.on_new_window` → system-browser route (the plugin's open_url/open_path Rust capabilities are unaffected)
+- Fix 2: `menu.rs` adds a **capture-phase** click handler as a backstop — http/https links with `target="_blank"` (or Ctrl/Shift+clicks) are `preventDefault`ed and explicitly rerouted via `window.open(url,'_blank','noopener')`, the same verified-native route as the context menu; either fix alone suffices
+
 ## v1.6.8 — 2026-08-21
 
 适配:**DSH rc.8 的 `dsh web` 自动打开浏览器**——桌面壳自己就显示 webchat,再弹浏览器是多余的。

@@ -1,7 +1,7 @@
 name: build dsh-local-shell installer
 
-# 自动链第 2 段: 构建自包含 GUI 安装器并发布到 Releases v2.0.1。
-# 壳 exe 从 Release v2.0.1 获取(容器构建会先把壳发布出来; 若尚未就绪则
+# 自动链第 2 段: 构建自包含 GUI 安装器并发布到 Releases v2.0.2。
+# 壳 exe 从 Release v2.0.2 获取(容器构建会先把壳发布出来; 若尚未就绪则
 # 轮询等待 shell workflow 完成), 全程无需手动介入。
 
 on:
@@ -27,7 +27,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # 1) 若 Release 已有壳, 直接用
-          if gh release download v2.0.1 --repo "$GITHUB_REPOSITORY" \
+          if gh release download v2.0.2 --repo "$GITHUB_REPOSITORY" \
                --pattern "dsh-local-shell.exe" --dir . --clobber 2>/dev/null && [ -f dsh-local-shell.exe ]; then
             echo "shell exe already in release"
           else
@@ -37,7 +37,7 @@ jobs:
               out=$(gh run list --repo "$GITHUB_REPOSITORY" --limit 50 \
                     --json databaseId,conclusion,name \
                     --jq '[.[]|select(.name=="build dsh-local-shell (shell)" and .status=="completed")][0].conclusion' 2>/dev/null || true)
-              if [ -f dsh-local-shell.exe ] || { gh release download v2.0.1 --repo "$GITHUB_REPOSITORY" --pattern "dsh-local-shell.exe" --dir . --clobber 2>/dev/null && [ -f dsh-local-shell.exe ]; }; then
+              if [ -f dsh-local-shell.exe ] || { gh release download v2.0.2 --repo "$GITHUB_REPOSITORY" --pattern "dsh-local-shell.exe" --dir . --clobber 2>/dev/null && [ -f dsh-local-shell.exe ]; }; then
                 echo "shell exe fetched"
                 break
               fi
@@ -70,14 +70,14 @@ jobs:
           path: dsh-local-shell-install.exe
           if-no-files-found: error
 
-      - name: publish installer exe to Releases v2.0.1 (auto chain)
+      - name: publish installer exe to Releases v2.0.2 (auto chain)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           for i in $(seq 1 60); do
-            if gh release view v2.0.1 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              gh release upload v2.0.1 dsh-local-shell-install.exe --repo "$GITHUB_REPOSITORY" --clobber
+            if gh release view v2.0.2 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release upload v2.0.2 dsh-local-shell-install.exe --repo "$GITHUB_REPOSITORY" --clobber
               break
             fi
             sleep 10

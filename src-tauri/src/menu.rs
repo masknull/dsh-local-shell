@@ -58,6 +58,28 @@ pub(crate) const MENU_SCRIPT: &str = r#"
     menu.style.top = Math.min(y, innerHeight - h - 8) + 'px';
   }
 
+  // 左键 / Ctrl+点击 `target="_blank"` 外链: 直接交给系统浏览器打开。
+  // 背景: tauri-plugin-opener 注入的 init-iife.js(open_js_links_on_click)会在 window
+  // 冒泡阶段拦截这类点击并改走 JS 侧 `plugin:opener|open_url` IPC, 而 3080 这个外部
+  // 远程页面里没有可靠的 Tauri IPC 桥, 拦截后原生新窗口也被 preventDefault 压掉, 于是
+  // 两头落空——左键/Ctrl+点击完全没反应。这里用一个**捕获阶段**处理器抢在 opener 之前
+  // 接管, preventDefault 后改走 `window.open` —— 与右键菜单同一条 native→Rust
+  // on_new_window→系统浏览器通道(该通道经右键实测可靠), 不依赖任何页面内 Tauri IPC。
+  document.addEventListener('click', function (e) {
+    // 只接管左键; metaKey/altKey 的其它语义(如 Cmd/Ctrl 开新标签)留给 opener/浏览器
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.altKey) return;
+    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a || !a.href) return;
+    var isBlankTarget = (a.target || '').toLowerCase() === '_blank';
+    var isModifier = e.ctrlKey || e.shiftKey;
+    if (!isBlankTarget && !isModifier) return;
+    var u;
+    try { u = new URL(a.href); } catch (err) { return; }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
+    e.preventDefault();
+    e.stopPropagation();
+    openInBrowser(a.href);
+  }, true);
   document.addEventListener('contextmenu', function (e) {
     var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
     if (!a) return;
