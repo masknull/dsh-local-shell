@@ -228,7 +228,7 @@ pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
             .and_then(|w| w.window_handle().ok())
             .and_then(|h| match h.as_raw() {
                 raw_window_handle::RawWindowHandle::Win32(wh) =>
-                    Some(wh.hwnd as *const core::ffi::c_void),
+                    Some(wh.hwnd.get() as *const core::ffi::c_void),
                 _ => None,
             })
             .unwrap_or(core::ptr::null());
