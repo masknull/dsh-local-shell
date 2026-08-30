@@ -35,6 +35,8 @@ serde_yaml = "0.9"
 # No TLS: we only ever talk to loopback 127.0.0.1:3080.
 ureq = { version = "2", features = ["json"] }
 sha2 = "0.10"
+# Get the main window HWND for MessageBox centering.
+raw-window-handle = "0.6"
 # Blocking WebSocket client for the events.host stream; runs on its own thread.
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 # Same http major as tungstenite 0.24 (1.x), unified by Cargo.

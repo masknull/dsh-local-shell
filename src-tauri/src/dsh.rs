@@ -439,18 +439,35 @@ pub(crate) fn check_auth_wall_now(app: &AppHandle) {
         let Some(w) = app.get_webview_window("main") else {
             return;
         };
+        // 用浏览器自动记录的导航状态码判定认证墙(不发 fetch / 不碰 cookie):
+        // DSH 返回 401 时 `performance.getEntriesByType('navigation')[0].responseStatus`
+        // 为 401; dsh-remote 拦截返回 200 登录页时该值为 200。WebView2 基于新
+        // Chromium, 支持 Navigation Timing Level 2 的 responseStatus。
+        // 若不可用(undefined)则回退到 contentType 检测(text/plain)。
         let js = "(function(){ \
                    try { \
-                     var b = document.body; \
-                     var t = b && (b.innerText || b.textContent) || ''; \
-                     if (t.indexOf('dsh web authentication required') >= 0) { \
+                     var isWall = false; \
+                     try { \
+                       var e = performance.getEntriesByType('navigation'); \
+                       if (e && e.length && e[0].responseStatus !== undefined) { \
+                         isWall = (e[0].responseStatus === 401); \
+                       } \
+                     } catch (e2) {} \
+                     if (!isWall) { \
+                       var d = document; \
+                       if (d.contentType === 'text/plain') { \
+                         var t = d.body && (d.body.innerText || d.body.textContent) || ''; \
+                         isWall = (t.indexOf('dsh web authentication required') >= 0); \
+                       } \
+                     } \
+                     if (isWall) { \
                        document.title = '__DSH_AUTH_WALL__'; \
-                       try { location.hash = 'dsh-shell-auth-wall'; } catch (e2) {} \
+                       try { location.hash = 'dsh-shell-auth-wall'; } catch (e3) {} \
                      } \
                    } catch (e) {} \
                  })();";
         let _ = w.eval(js);
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(200));
         let title = w.title().unwrap_or_default();
         let url = w.url().map(|u| u.to_string()).unwrap_or_default();
         if title.contains("__DSH_AUTH_WALL__") || url.contains("dsh-shell-auth-wall") {
@@ -460,6 +477,7 @@ pub(crate) fn check_auth_wall_now(app: &AppHandle) {
                 return;
             }
             let take_over = crate::prompt_yes_no(
+                &app,
                 "DSH 需要浏览器认证",
                 concat!(
                     "检测到 DSH 需要浏览器令牌(新版本认证),但当前实例不是本应用启动的,无法获取令牌。\n\n",
@@ -468,26 +486,14 @@ pub(crate) fn check_auth_wall_now(app: &AppHandle) {
                 ),
             );
             if take_over {
-                // 复用启动初始化反馈: 先广播 starting, 再清掉 3080 上的旧
-                // 实例并回 boot 页 — boot 页初始态即《正在启动 DSH…》, 且
-                // 端口已清后 on_page_load 触发的 emit_current_status 探测
-                // 不到旧实例、不会 emit `ready`, 页面稳定停在《正在启动
-                // DSH…》给用户视觉反馈(和冷启动一致)。
-                let _ = app.emit(
-                    "dsh-status",
-                    json!({ "status": "starting", "method": "接管后重启 dsh web" }),
-                );
-                teardown(&app); // attach 模式无自有子进程, no-op
-                kill_port_listeners();
-                navigate_shell(&app);
-                // 等旧实例完全退出(端口释放 + 进程树收尾)再自启,避免新
-                // 实例撞上旧残留(usage-billing writer / TIME_WAIT / 锁
-                // 文件)而崩溃。
-                wait_for_backend_stop();
-                startup(app.clone());
-                // 接管后的新实例是我们自己 spawn 的(带 token, inner 有值,
-                // check_auth_wall_now 的 inner 守卫会挡掉自启实例), 重置
-                // 标志以便将来再遇 attach 401 时能再次弹窗, 而非永久卡死。
+                // 与托盘「重启 dsh web(后端)」同一套流程: 广播 starting →
+                // 回 boot 页 → 清理旧实例 → 等完全退出 → 启动链。boot 页
+                // 初始态即《正在启动 DSH…》, 端口已清后 on_page_load 触发
+                // 的 emit_current_status 探测不到旧实例、不会 emit `ready`,
+                // 页面稳定停在《正在启动 DSH…》给用户视觉反馈(和冷启动一致)。
+                restart_backend(&app, "接管后重启 dsh web");
+                // 接管后的新实例是我们自己 spawn 的(带 token), 重置标志以便
+                // 将来再遇 attach 401 时能再次弹窗, 而非永久卡死。
                 AUTH_WALL_HANDLED.store(false, std::sync::atomic::Ordering::Relaxed);
             } else {
                 app.exit(0);
@@ -1309,14 +1315,10 @@ fn supervise_child(app: AppHandle, mut child: Child, pid: u32, spawned_at: Insta
     // (a later quit would not stop it), so let it land, clear the port, and
     // spawn our own child instead.
     std::thread::sleep(Duration::from_millis(2500));
-    kill_port_listeners();
-    // 等旧实例完全退出再启动, 避免新实例撞上旧残留(usage-billing writer /
-    // TIME_WAIT / 锁文件)而崩溃。
-    wait_for_backend_stop();
-    // startup() re-emits `ready`, and the persistent shell reloads its
-    // webchat iframe on that event — no window.eval navigation to a page
-    // we no longer control.
-    startup(app.clone());
+    // 崩溃自愈: 与托盘「重启 dsh web」/401 接管同一套清理+启动核心, 但
+    // 不导航回 boot 页(用户可能在 webchat 中, 静默恢复; ready 事件会让
+    // 持久 shell 重新加载 webchat iframe)。
+    restart_backend_silent(&app, "崩溃自愈重启");
 }
 
 /// Frontend "使用此路径启动" from the notfound dialog: remember the
@@ -1518,27 +1520,27 @@ fn cmp_ver(a: &str, b: &str) -> std::cmp::Ordering {
 
 /// 托盘「检查更新(DSH)」: 查 npm 最新版, 有新版弹窗确认后用官方命令更新。
 /// 全程在后台线程执行(版本检查/弹窗/更新), 不阻塞托盘与事件线程, 不影响前台。
-pub fn check_update(_app: AppHandle) {
-    std::thread::spawn(|| {
+pub fn check_update(app: AppHandle) {
+    std::thread::spawn(move || {
         let current = run_capture_line("dsh --version")
             .map(|(t, _)| t)
             .unwrap_or_default();
         let Some(latest) = fetch_latest_version() else {
-            crate::prompt_yes_no("检查更新", "无法获取最新版本(网络不可达或 registry 失败)。");
+            crate::prompt_yes_no(&app, "检查更新", "无法获取最新版本(网络不可达或 registry 失败)。");
             return;
         };
         if current.trim().is_empty() {
-            crate::prompt_yes_no("检查更新", "无法获取当前 dsh 版本(请确认 dsh 命令可用)。");
+            crate::prompt_yes_no(&app, "检查更新", "无法获取当前 dsh 版本(请确认 dsh 命令可用)。");
             return;
         }
         if cmp_ver(&latest, &current) != std::cmp::Ordering::Greater {
-            crate::prompt_yes_no("检查更新", &format!("已是最新版本: {latest}"));
+            crate::prompt_yes_no(&app, "检查更新", &format!("已是最新版本: {latest}"));
             return;
         }
         let question = format!(
             "发现新版本 {latest}(当前 {current})\n\n是否立即更新?\n(将执行: npm install -g @deepseek-ai/dsh@{latest})"
         );
-        if !crate::prompt_yes_no("检查更新", &question) {
+        if !crate::prompt_yes_no(&app, "检查更新", &question) {
             return;
         }
         // npm 装包可能耗时, 同样在后台线程执行, 完成后再弹窗提示。
@@ -1546,9 +1548,10 @@ pub fn check_update(_app: AppHandle) {
             .map(|(_, ok)| ok)
             .unwrap_or(false);
         if ok {
-            crate::prompt_yes_no("检查更新", "更新成功。请重启 DSH(dsh web)使新版本生效。");
+            crate::prompt_yes_no(&app, "检查更新", "更新成功。请重启 DSH(dsh web)使新版本生效。");
         } else {
             crate::prompt_yes_no(
+                &app,
                 "检查更新",
                 &format!("更新失败。请手动执行:\nnpm install -g @deepseek-ai/dsh@{latest}"),
             );
@@ -1603,21 +1606,39 @@ pub fn stop_backend(app: &AppHandle) {
     kill_port_listeners();
 }
 
+/// 统一的后端重启核心：所有"杀旧实例+重新启动"的入口(托盘「重启 dsh web」、
+/// 401 认证墙接管、崩溃自愈)都走这一条, 保证顺序与反馈一致。
+/// 顺序: 广播 starting → 回 boot 页 → 清理旧实例 → 等完全退出 → 启动链。
+fn restart_backend(app: &AppHandle, method: &str) {
+    let _ = app.emit(
+        "dsh-status",
+        json!({ "status": "starting", "method": method }),
+    );
+    stop_backend(app);
+    // 等旧实例完全退出(端口释放 + 进程树收尾)再启动, 避免新实例撞上
+    // 旧残留(usage-billing writer / TIME_WAIT / 锁文件)而崩溃。
+    wait_for_backend_stop();
+    startup(app.clone());
+}
+
+/// 静默重启核心: 与 `restart_backend` 同一套清理+启动, 但不回 boot 页
+/// (崩溃自愈用 — 用户可能在 webchat 中, 静默恢复)。
+fn restart_backend_silent(app: &AppHandle, method: &str) {
+    let _ = app.emit(
+        "dsh-status",
+        json!({ "status": "starting", "method": method }),
+    );
+    teardown(app);
+    kill_port_listeners();
+    wait_for_backend_stop();
+    startup(app.clone());
+}
+
 pub fn restart(app: AppHandle) {
     // Pop the window first so a restart triggered while hidden in the tray is
     // visibly underway instead of looking like a no-op.
     crate::show_main_window(&app);
-    std::thread::spawn(move || {
-        let _ = app.emit(
-            "dsh-status",
-            json!({ "status": "starting", "method": "正在重启 dsh web" }),
-        );
-        stop_backend(&app);
-        // 等旧实例完全退出(端口释放 + 进程树收尾)再启动, 避免新实例撞上
-        // 旧残留(usage-billing writer / TIME_WAIT / 锁文件)而崩溃。
-        wait_for_backend_stop();
-        startup(app.clone());
-    });
+    std::thread::spawn(move || restart_backend(&app, "正在重启 dsh web"));
 }
 
 /// Kill any process still listening on the DSH port: an attached instance we

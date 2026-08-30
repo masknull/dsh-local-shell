@@ -209,7 +209,8 @@ fn quit_dsh(app: &AppHandle) {
 }
 
 /// 通用 MessageBox 确认弹窗(是/否), 供 dsh.rs 的更新检查等功能使用。
-pub(crate) fn prompt_yes_no(title: &str, text: &str) -> bool {
+/// 传入 AppHandle 以获取主窗口 HWND, 使弹窗居中于父窗口。
+pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
     #[cfg(windows)]
     unsafe {
         extern "system" {
@@ -222,11 +223,21 @@ pub(crate) fn prompt_yes_no(title: &str, text: &str) -> bool {
         }
         let text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         let caption: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        use raw_window_handle::HasWindowHandle;
+        let hwnd = app.get_webview_window("main")
+            .and_then(|w| w.window_handle().ok())
+            .and_then(|h| match h.as_raw() {
+                raw_window_handle::RawWindowHandle::Win32(wh) =>
+                    Some(wh.hwnd as *const core::ffi::c_void),
+                _ => None,
+            })
+            .unwrap_or(core::ptr::null());
         // MB_YESNO(0x4) | MB_ICONQUESTION(0x20) | MB_APPLMODAL(0)
-        MessageBoxW(core::ptr::null(), text.as_ptr(), caption.as_ptr(), 0x4 | 0x20) == 6 // IDYES
+        MessageBoxW(hwnd, text.as_ptr(), caption.as_ptr(), 0x4 | 0x20) == 6 // IDYES
     }
     #[cfg(not(windows))]
     {
+        let _ = app;
         false
     }
 }
