@@ -424,11 +424,11 @@ static AUTH_WALL_HANDLED: std::sync::atomic::AtomicBool =
 /// flow (200 login page first, then a top-level 401 after sign-in) is each a
 /// separate navigation, so this fires again exactly when the 401 surfaces.
 pub(crate) fn check_auth_wall_now(app: &AppHandle) {
-    // Attach mode only: a self-launched instance holds the token and never
-    // shows the wall.
-    if app.state::<DshState>().inner.lock().unwrap().is_some() {
-        return;
-    }
+    // 注意: 不能按 inner.is_some() 跳过自启实例 — 装了前端登录插件
+    // (dsh-remote) 时, 自启实例的 token URL 会被插件在 HTTP 层拦截返回
+    // 200 登录页, 用户登录后 DSH 才出现 401 认证墙; 若这里跳过, 用户
+    // 会陷入"登录→401→重启→登录页"死循环。AUTH_WALL_HANDLED 已足够
+    // 防重复弹窗, 接管流程也只对真的 401 页动作。
     if AUTH_WALL_HANDLED.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
