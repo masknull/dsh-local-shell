@@ -364,15 +364,16 @@ fn resolve_launch_url() -> Option<String> {
 ///   cookie minted on the first tokenized visit covers this run.
 fn navigate_webchat(app: &AppHandle, spawned: bool) {
     if spawned {
-        // The launch-URL line is printed by `dsh web` early, but the pipe
-        // reader may still be draining it when the readiness probe wins —
-        // a short bounded retry covers that without the multi-second spin.
-        for _ in 0..5 {
+        // 自启模式: 新实例 spawn 后 token 行(`dsh web: …?token=`)要等 pipe
+        // 泵入 tail 才可见, 而 readiness probe 可能更早赢。给足重试窗口,
+        // 避免 token 没解析到就 fallback 裸 URL 又撞 401。attach 分支不走
+        // 这里, 零等待不受影响。
+        for _ in 0..20 {
             if let Some(url) = resolve_launch_url() {
                 navigate_main(app, &url);
                 return;
             }
-            std::thread::sleep(Duration::from_millis(300));
+            std::thread::sleep(Duration::from_millis(400));
         }
     }
     navigate_main(app, DSH_BASE);
@@ -467,20 +468,27 @@ pub(crate) fn check_auth_wall_now(app: &AppHandle) {
                 ),
             );
             if take_over {
-                // 先清掉 3080 上的旧实例再回 boot 页,否则 boot 页加载后
-                // emit_current_status 探测到旧实例仍在会 emit `ready`,
-                // 用户看不到《正在启动 DSH…》的重启反馈。
+                // 复用启动初始化反馈: 先广播 starting, 再清掉 3080 上的旧
+                // 实例并回 boot 页 — boot 页初始态即《正在启动 DSH…》, 且
+                // 端口已清后 on_page_load 触发的 emit_current_status 探测
+                // 不到旧实例、不会 emit `ready`, 页面稳定停在《正在启动
+                // DSH…》给用户视觉反馈(和冷启动一致)。
+                let _ = app.emit(
+                    "dsh-status",
+                    json!({ "status": "starting", "method": "接管后重启 dsh web" }),
+                );
                 teardown(&app); // attach 模式无自有子进程, no-op
                 kill_port_listeners();
                 navigate_shell(&app);
                 // 等旧实例完全退出(端口释放 + 进程树收尾)再自启,避免新
                 // 实例撞上旧残留(usage-billing writer / TIME_WAIT / 锁
-                // 文件)而崩溃。端口一停即继续,不额外固定 sleep。
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while probe_ready_once() && Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(500));
-                }
+                // 文件)而崩溃。
+                wait_for_backend_stop();
                 startup(app.clone());
+                // 接管后的新实例是我们自己 spawn 的(带 token, inner 有值,
+                // check_auth_wall_now 的 inner 守卫会挡掉自启实例), 重置
+                // 标志以便将来再遇 attach 401 时能再次弹窗, 而非永久卡死。
+                AUTH_WALL_HANDLED.store(false, std::sync::atomic::Ordering::Relaxed);
             } else {
                 app.exit(0);
             }
@@ -1302,10 +1310,9 @@ fn supervise_child(app: AppHandle, mut child: Child, pid: u32, spawned_at: Insta
     // spawn our own child instead.
     std::thread::sleep(Duration::from_millis(2500));
     kill_port_listeners();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while probe_ready_once() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(500));
-    }
+    // 等旧实例完全退出再启动, 避免新实例撞上旧残留(usage-billing writer /
+    // TIME_WAIT / 锁文件)而崩溃。
+    wait_for_backend_stop();
     // startup() re-emits `ready`, and the persistent shell reloads its
     // webchat iframe on that event — no window.eval navigation to a page
     // we no longer control.
@@ -1606,12 +1613,9 @@ pub fn restart(app: AppHandle) {
             json!({ "status": "starting", "method": "正在重启 dsh web" }),
         );
         stop_backend(&app);
-        // Wait for the old instance to stop answering so startup's attach
-        // probe cannot latch onto the dying server and report ready.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while probe_ready_once() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(500));
-        }
+        // 等旧实例完全退出(端口释放 + 进程树收尾)再启动, 避免新实例撞上
+        // 旧残留(usage-billing writer / TIME_WAIT / 锁文件)而崩溃。
+        wait_for_backend_stop();
         startup(app.clone());
     });
 }
@@ -1640,6 +1644,31 @@ fn kill_port_listeners() {
             }
         }
     }
+}
+
+/// After stopping the backend, wait until the old instance is *fully* gone
+/// before the startup chain spawns a replacement. Port release is not enough:
+/// the old dsh process tree (usage-billing writer, cordis children, …) takes
+/// a few seconds to tear down, and a too-early relaunch makes the fresh dsh
+/// web crash on leftover state (double usage-billing writer, TIME_WAIT port,
+/// held lock files). Condition-based, not a blind fixed sleep: we proceed the
+/// moment the port is confirmed clear.
+fn wait_for_backend_stop() {
+    // 1) Wait for the port to stop answering (the old server's dying window).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while probe_ready_once() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    // 2) Wait for no process to be listening on 3080 — the old listener has
+    //    been killed by `kill_port_listeners`; this polls until the tree is
+    //    reaped. Condition-based: if the tree exits fast we proceed fast.
+    let settle = Instant::now() + Duration::from_secs(8);
+    while port_listener_pid().is_some() && Instant::now() < settle {
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    // 3) Short settle so the rest of the tree (usage-billing writer, cordis
+    //    children, …) finishes unwinding + TIME_WAIT/lock files clear.
+    std::thread::sleep(Duration::from_millis(1000));
 }
 
 /// Tear down the owned subprocess tree (if we spawned one). Safe to call from
