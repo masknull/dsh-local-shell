@@ -224,12 +224,15 @@ pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
         let text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         let caption: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
         use raw_window_handle::HasWindowHandle;
-        let hwnd = app.get_webview_window("main")
-            .and_then(|w| w.window_handle().ok())
-            .and_then(|h| match h.as_raw() {
-                raw_window_handle::RawWindowHandle::Win32(wh) =>
-                    Some(wh.hwnd.get() as *const core::ffi::c_void),
-                _ => None,
+        let hwnd = app
+            .get_webview_window("main")
+            .and_then(|w| {
+                // WindowHandle 借用 w, 必须在闭包内立刻解出裸指针再返回。
+                w.window_handle().ok().and_then(|h| match h.as_raw() {
+                    raw_window_handle::RawWindowHandle::Win32(wh) =>
+                        Some(wh.hwnd.get() as *const core::ffi::c_void),
+                    _ => None,
+                })
             })
             .unwrap_or(core::ptr::null());
         // MB_YESNO(0x4) | MB_ICONQUESTION(0x20) | MB_APPLMODAL(0)
