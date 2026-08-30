@@ -343,11 +343,24 @@ pub fn run() {    tauri::Builder::default()
             // spinner while the backend is actually up.
             .on_page_load(|webview, payload| {
                 use tauri::webview::PageLoadEvent;
-                if payload.event() == PageLoadEvent::Finished
-                    && !payload.url().to_string().starts_with("about:")
-                {
+                if payload.event() == PageLoadEvent::Finished {
+                    let url = payload.url().to_string();
                     let app = webview.app_handle().clone();
-                    std::thread::spawn(move || dsh::emit_current_status(&app));
+                    // Auth wall check (attach mode): fires once per page load
+                    // on the DSH origin — covers the bare attach URL AND the
+                    // login-plugin flow (200 login page first, top-level 401
+                    // after sign-in). Event-driven, no poll loop.
+                    if url.starts_with("http://127.0.0.1:3080") {
+                        std::thread::spawn(move || dsh::check_auth_wall_now(&app));
+                    }
+                    // F5 (or any webview reload) remounts the shell page, which
+                    // missed the original `ready` emit — re-announce the current
+                    // backend state so the fresh page doesn't sit on the boot
+                    // spinner while the backend is actually up.
+                    if !url.starts_with("about:") {
+                        let app = webview.app_handle().clone();
+                        std::thread::spawn(move || dsh::emit_current_status(&app));
+                    }
                 }
             })
             .on_new_window(move |url, _features| {

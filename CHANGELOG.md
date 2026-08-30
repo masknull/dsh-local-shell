@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.0.3 — 2026-08-30
+
+适配:**DSH v0.1.2-alpha.1 起的浏览器令牌认证**(dsh web 在启动输出打印一次性进程令牌 URL;无令牌访问 `/` 返回 401 `dsh web authentication required`;令牌只存在于启动该 DSH 的进程内存与启动输出中,无任何查询/落盘接口)。**以 v2.0.2 为基线重做**,吸取 v2.0.3 首版适配教训(启动器变重、右键重启不可用),保持轻量:
+
+- **自启模式**:壳从自己拉起的 DSH 子进程控制台尾部(`CHILD_TAIL`)解析 `dsh web: http://127.0.0.1:3080/?token=…` 启动行(纯字符串扫描,无 regex 依赖),导航到带令牌的 URL——首次访问由 DSH 签发持久签名 cookie(默认 30 天)落入 WebView2 数据目录,此后(含 attach)靠 cookie 直接通过。老版本 DSH 无此输出时保持原裸 URL 导航,向后兼容
+- **attach + 壳已有 cookie**:裸 URL 直接通过(30 天有效),零开销
+- **attach + 壳无 cookie**:认证墙检测改为 **`on_page_load` 事件驱动**(无轮询)——每次页面加载完成检查一次,命中 DSH 401 页才弹窗「是(壳接管重启 dsh web 宿主并自动认证)/否(退出保留外部实例)」。覆盖前端登录插件(dsh-remote)多阶段流程:先 200 登录页、用户登录后顶层导航到 DSH 401,每次导航各触发一次检测
+- **修复 v2.0.3 首版问题**:
+  - attach 不再空转 9 秒解析 token(attach 无子进程 tail,直接裸 URL;残留旧 token 不再被误用)
+  - 认证墙探测器不再无条件跑 12 轮 ≈12 秒(事件驱动,命中才动作)
+  - 重启/崩溃自愈不再固定 sleep 3 秒(端口一停即继续)
+  - 不再新增 regex 依赖(Cargo.toml 不变)
+
+Adapts to the browser-token auth introduced in DSH v0.1.2-alpha.1 (`dsh web` prints a one-shot process token in the URL; a token-less `/` gets 401 `dsh web authentication required`; the token lives only in the launching process's memory/stdout — no query or file API exists). Rebased on v2.0.2, learning from the first v2.0.3 attempt (bloated startup, broken tray restart):
+
+- Self-launch: parses the `dsh web: http://127.0.0.1:3080/?token=…` line from its own child's console tail (plain string scan, no regex dependency) and navigates to the tokenized URL — the first visit mints the persistent signed cookie (30-day default) into the WebView2 user-data dir, so later runs (including attach) pass on the cookie alone. Legacy DSH versions without this line keep the bare-URL navigation (backward compatible)
+- Attach with an existing cookie: the bare URL already works (30-day cookie)
+- Attach without a cookie: the auth-wall check is **event-driven via `on_page_load`** (no poll loop) — one read per page load, prompting 「是」take over (restart the dsh web host and self-authenticate) / 「否」quit (leave the external instance) only when DSH's real 401 page appears. Covers the front-auth plugin (dsh-remote) multi-stage flow: a 200 login page first, then a top-level 401 after sign-in — each navigation triggers one check
+- Fixes from the first v2.0.3 attempt: no 9s attach spin resolving a token that cannot exist (attach has no child tail; stale tokens are never reused), no unconditional ~12s wall-detector loop (event-driven, acts only on hit), no fixed 3s sleep on restart/crash-heal (continues as soon as the port is free), no regex dependency (Cargo.toml unchanged)
+
 ## v2.0.2 — 2026-08-25
 
 修复:**左键/Ctrl+点击 `target="_blank"` 外链无法打开系统浏览器**(右键「在新窗口打开」正常)。

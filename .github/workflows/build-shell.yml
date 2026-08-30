@@ -1,6 +1,6 @@
 name: build dsh-local-shell (shell)
 
-# 自动链第 1 段: 构建主程序并发布到 Releases v2.0.2。
+# 自动链第 1 段: 构建主程序并发布到 Releases v2.0.3。
 # 触发: 壳/前端/构建配置变更。产物自动上传 Release 的 dsh-local-shell.exe。
 
 on:
@@ -54,15 +54,15 @@ jobs:
           path: dsh-local-shell.exe
           if-no-files-found: error
 
-      - name: publish shell exe to Releases v2.0.2 (auto chain)
+      - name: publish shell exe to Releases v2.0.3 (auto chain)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v2.0.2 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload v2.0.2 dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" --clobber
+          if gh release view v2.0.3 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v2.0.3 dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create v2.0.2 dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" \
-              --title "dsh-local-shell v2.0.2" \
-              --notes "DeepSeek Harness local shell (auto-built)" || gh release upload v2.0.2 dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" --clobber
+            gh release create v2.0.3 dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" \
+              --title "dsh-local-shell v2.0.3" \
+              --notes "DeepSeek Harness local shell (auto-built)" || gh release upload v2.0.3 dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" --clobber
           fi

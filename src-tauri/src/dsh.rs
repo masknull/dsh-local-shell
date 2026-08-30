@@ -30,6 +30,16 @@ use uuid::Uuid;
 const DSH_ORIGIN: &str = "http://127.0.0.1:3080";
 const DSH_BASE: &str = "http://127.0.0.1:3080";
 
+/// Substring anchor of the `dsh web` launch line that carries the
+/// process-scoped browser-auth token, e.g.
+/// `dsh web: http://127.0.0.1:3080/?token=<base64url>`.
+/// DSH v0.1.2-alpha.1+ requires this token (or the signed cookie it mints) to
+/// serve `/`; the token lives only in the launching process's stdout and in
+/// memory, so the shell must capture it from the child's console tail on
+/// self-launched runs. Attach runs have no child of ours — they rely on the
+/// signed cookie minted on the first tokenized visit (30-day default).
+const DSH_LAUNCH_URL_ANCHOR: &str = "http://127.0.0.1:3080/?token=";
+
 /// Readiness window for the single-command `DSH_CMD` chain.
 const DSH_CMD_WINDOW: Duration = Duration::from_secs(120);
 /// Readiness window for the npx candidate: its first run downloads the full
@@ -322,8 +332,49 @@ fn navigate_main(app: &AppHandle, url: &str) {
     }
 }
 
+/// Extract the authenticated webchat URL (`http://127.0.0.1:3080/?token=…`)
+/// from the child's console tail, if DSH (v0.1.2-alpha.1+) printed it.
+/// Older DSH versions without the browser-auth layer print no such line and
+/// the caller falls back to the bare `DSH_BASE`. Only the SELF-LAUNCHED
+/// child's tail is consulted — attach runs must NOT read the tail (it may
+/// hold a stale token from a previous run of ours; the signed cookie minted
+/// on the first tokenized visit covers attach runs instead).
+fn resolve_launch_url() -> Option<String> {
+    for line in child_tail_last(CHILD_TAIL_CAP) {
+        if let Some(pos) = line.find(DSH_LAUNCH_URL_ANCHOR) {
+            let rest = &line[pos + DSH_LAUNCH_URL_ANCHOR.len()..];
+            // token = base64url: [A-Za-z0-9_-]+
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                .unwrap_or(rest.len());
+            if end > 0 {
+                return Some(format!("http://127.0.0.1:3080/?token={}", &rest[..end]));
+            }
+        }
+    }
+    None
+}
+
 /// Top-level navigation to the webchat.
-fn navigate_webchat(app: &AppHandle) {
+/// - `spawned=true` (we launched the child): prefer the tokenized URL parsed
+///   from the child's console tail (new DSH browser auth), else the bare
+///   origin (legacy DSH).
+/// - `spawned=false` (attach): bare origin only — never the tail, whose
+///   content belongs to a previous run and whose token is stale. The signed
+///   cookie minted on the first tokenized visit covers this run.
+fn navigate_webchat(app: &AppHandle, spawned: bool) {
+    if spawned {
+        // The launch-URL line is printed by `dsh web` early, but the pipe
+        // reader may still be draining it when the readiness probe wins —
+        // a short bounded retry covers that without the multi-second spin.
+        for _ in 0..5 {
+            if let Some(url) = resolve_launch_url() {
+                navigate_main(app, &url);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }
     navigate_main(app, DSH_BASE);
 }
 
@@ -348,6 +399,93 @@ fn probe_ready_once() -> bool {
         Err(ureq::Error::Status(_, _)) => true, // 401/403/…: an auth wall still proves the server runs
         Err(_) => false,                        // connection refused / timeout
     }
+}
+
+/// True once the auth-wall takeover flow has fired this run — guards against
+/// duplicate prompts when `on_page_load` fires across the multi-stage
+/// navigation (login plugin 200 page → login → DSH 401).
+static AUTH_WALL_HANDLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Event-driven auth-wall check, invoked from lib.rs `on_page_load` whenever
+/// the webview lands on a DSH origin. DSH v0.1.2-alpha.1+ renders a plain-text
+/// 401 page ("dsh web authentication required") in the shell's own WebView2
+/// when no signed cookie is present — exactly what the user sees. An HTTP
+/// probe is blind to this through a front-auth plugin, so read the rendered
+/// page back: inject JS that mirrors the marker into BOTH the document.title
+/// and the location.hash (the hash is always readable back through `w.url()`),
+/// then Rust checks the window title and the URL. When detected, offer to
+/// restart the host (shell takes over and self-launches a DSH whose token it
+/// can capture) or quit.
+///
+/// Event-driven (no poll loop) because the navigation itself carries the
+/// signal: `on_page_load` fires per page load, and the dsh-remote multi-stage
+/// flow (200 login page first, then a top-level 401 after sign-in) is each a
+/// separate navigation, so this fires again exactly when the 401 surfaces.
+pub(crate) fn check_auth_wall_now(app: &AppHandle) {
+    // Attach mode only: a self-launched instance holds the token and never
+    // shows the wall.
+    if app.state::<DshState>().inner.lock().unwrap().is_some() {
+        return;
+    }
+    if AUTH_WALL_HANDLED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        // Let the just-finished page load render its body before the read.
+        std::thread::sleep(Duration::from_millis(200));
+        let Some(w) = app.get_webview_window("main") else {
+            return;
+        };
+        let js = "(function(){ \
+                   try { \
+                     var b = document.body; \
+                     var t = b && (b.innerText || b.textContent) || ''; \
+                     if (t.indexOf('dsh web authentication required') >= 0) { \
+                       document.title = '__DSH_AUTH_WALL__'; \
+                       try { location.hash = 'dsh-shell-auth-wall'; } catch (e2) {} \
+                     } \
+                   } catch (e) {} \
+                 })();";
+        let _ = w.eval(js);
+        std::thread::sleep(Duration::from_millis(150));
+        let title = w.title().unwrap_or_default();
+        let url = w.url().map(|u| u.to_string()).unwrap_or_default();
+        if title.contains("__DSH_AUTH_WALL__") || url.contains("dsh-shell-auth-wall") {
+            // Claim the guard before showing the modal; a concurrent page-load
+            // invocation must not stack a second prompt.
+            if AUTH_WALL_HANDLED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let take_over = crate::prompt_yes_no(
+                "DSH 需要浏览器认证",
+                concat!(
+                    "检测到 DSH 需要浏览器令牌(新版本认证),但当前实例不是本应用启动的,无法获取令牌。\n\n",
+                    "「是」重启 dsh web 宿主(由本应用接管,自动完成认证)\n",
+                    "「否」退出本应用(保留当前 DSH 实例)",
+                ),
+            );
+            if take_over {
+                // 先清掉 3080 上的旧实例再回 boot 页,否则 boot 页加载后
+                // emit_current_status 探测到旧实例仍在会 emit `ready`,
+                // 用户看不到《正在启动 DSH…》的重启反馈。
+                teardown(&app); // attach 模式无自有子进程, no-op
+                kill_port_listeners();
+                navigate_shell(&app);
+                // 等旧实例完全退出(端口释放 + 进程树收尾)再自启,避免新
+                // 实例撞上旧残留(usage-billing writer / TIME_WAIT / 锁
+                // 文件)而崩溃。端口一停即继续,不额外固定 sleep。
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while probe_ready_once() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                startup(app.clone());
+            } else {
+                app.exit(0);
+            }
+        }
+    });
 }
 
 /// Outcome of one candidate attempt.
@@ -405,7 +543,12 @@ pub fn startup(app: AppHandle) {
     // Attach path: DSH already up — never spawn, never kill on exit.
     if probe_ready_once() {
         emit_ready(&app, true, None);
-        navigate_webchat(&app);
+        // Attach: bare URL only (cookie from an earlier tokenized visit
+        // covers this run; the tail belongs to no child of ours). The
+        // auth-wall check is event-driven from lib.rs `on_page_load` — it
+        // fires once per page load and only acts when DSH's real 401 page
+        // appears, covering the login-plugin multi-stage flow too.
+        navigate_webchat(&app, false);
         return;
     }
 
@@ -464,7 +607,7 @@ fn try_candidate(app: &AppHandle, candidate: &Candidate) -> Attempt {
                 *state.inner.lock().unwrap() = Some(DshInner { pid });
                 INTENTIONAL_STOP.store(false, std::sync::atomic::Ordering::Relaxed);
                 emit_ready(app, false, Some(candidate.label.clone()));
-                navigate_webchat(app);
+                navigate_webchat(app, true);
                 let app2 = app.clone();
                 std::thread::spawn(move || supervise_child(app2, child, pid, Instant::now()));
                 return Attempt::Ready;
