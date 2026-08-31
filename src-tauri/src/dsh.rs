@@ -379,9 +379,48 @@ fn navigate_webchat(app: &AppHandle, spawned: bool) {
     navigate_main(app, DSH_BASE);
 }
 
-/// Back to the shell boot page (tauri://localhost on release builds).
+/// The shell boot page's real URL, recorded from `on_page_load` the first time
+/// the window lands on it. Windows serves the app at `http://tauri.localhost`,
+/// NOT `tauri://localhost` — hardcoding the latter made every "back to boot"
+/// navigation fail into a white page (cold start + 401-takeover both hit it).
+static SHELL_URL: Mutex<Option<String>> = Mutex::new(None);
+
+/// Remember the shell page's origin+path (called from lib.rs `on_page_load`
+/// for any non-DSH, non-about page — the boot page itself).
+pub(crate) fn record_shell_url(url: &str) {
+    if let Ok(mut slot) = SHELL_URL.lock() {
+        if slot.is_none() {
+            *slot = Some(url.to_string());
+        }
+    }
+}
+
+/// Back to the shell boot page. Two guards:
+/// 1. When the window is ALREADY on the shell (cold start: index.html is still
+///    loading, or the boot page is showing), navigating again would abort the
+///    in-flight load and leave a white page — skip instead. Only a window
+///    actually sitting on the DSH origin needs the trip back.
+/// 2. Navigate to the RECORDED shell URL (falling back to the Windows-served
+///    `http://tauri.localhost/index.html`); the old hardcoded
+///    `tauri://localhost` scheme does not resolve on Windows WebView2.
 fn navigate_shell(app: &AppHandle) {
-    navigate_main(app, "tauri://localhost/index.html");
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
+    let current = w.url().map(|u| u.to_string()).unwrap_or_default();
+    // about:blank = the very first load is still pending; 3080 = webchat.
+    // Anything else (tauri.localhost / dev server) is already the boot page.
+    if !current.starts_with("http://127.0.0.1:3080") {
+        return;
+    }
+    let target = SHELL_URL
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone())
+        .unwrap_or_else(|| "http://tauri.localhost/index.html".to_string());
+    if let Ok(u) = tauri::Url::parse(&target) {
+        let _ = w.navigate(u);
+    }
 }
 
 /// Probe 3080 once; true when ANY HTTP server answers on the port.
@@ -520,7 +559,17 @@ enum Attempt {
 /// and would sit on the boot spinner forever while the backend is actually
 /// up — the backend itself never restarted. Idempotent with the normal
 /// startup flow (the frontend collapses ready re-emits into transitions).
+/// True while a restart (tray / 401 takeover / crash heal / cold start) is
+/// tearing down and respawning the backend. `emit_current_status` must not
+/// report `ready` off the dying old instance to a freshly reloaded boot page —
+/// it would flip the UI to "正在打开…" right before the port goes dark.
+static BACKEND_RESTARTING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub(crate) fn emit_current_status(app: &AppHandle) {
+    if BACKEND_RESTARTING.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     // Let the fresh page's listener register first.
     std::thread::sleep(Duration::from_millis(600));
     for _ in 0..5 {
@@ -558,6 +607,7 @@ fn emit_ready(app: &AppHandle, attached: bool, method: Option<String>) {    let 
 pub fn startup(app: AppHandle) {
     // Attach path: DSH already up — never spawn, never kill on exit.
     if probe_ready_once() {
+        BACKEND_RESTARTING.store(false, std::sync::atomic::Ordering::Relaxed);
         emit_ready(&app, true, None);
         // Attach: bare URL only (cookie from an earlier tokenized visit
         // covers this run; the tail belongs to no child of ours). The
@@ -573,6 +623,7 @@ pub fn startup(app: AppHandle) {
     // No local DSH and no consented download: hand the choice to the user
     // instead of silently pulling 500+ dependencies.
     if chain.is_empty() {
+        BACKEND_RESTARTING.store(false, std::sync::atomic::Ordering::Relaxed);
         let _ = app.emit("dsh-status", json!({ "status": "notfound" }));
         return;
     }
@@ -588,6 +639,7 @@ pub fn startup(app: AppHandle) {
             }
         }
     }
+    BACKEND_RESTARTING.store(false, std::sync::atomic::Ordering::Relaxed);
     let _ = app.emit(
         "dsh-status",
         json!({
@@ -622,6 +674,7 @@ fn try_candidate(app: &AppHandle, candidate: &Candidate) -> Attempt {
                 let state = app.state::<DshState>();
                 *state.inner.lock().unwrap() = Some(DshInner { pid });
                 INTENTIONAL_STOP.store(false, std::sync::atomic::Ordering::Relaxed);
+                BACKEND_RESTARTING.store(false, std::sync::atomic::Ordering::Relaxed);
                 emit_ready(app, false, Some(candidate.label.clone()));
                 navigate_webchat(app, true);
                 let app2 = app.clone();
@@ -1612,6 +1665,7 @@ pub fn stop_backend(app: &AppHandle) {
 /// 401 认证墙接管、崩溃自愈)都走这一条, 保证顺序与反馈一致。
 /// 顺序: 广播 starting → 回 boot 页 → 清理旧实例 → 等完全退出 → 启动链。
 fn restart_backend(app: &AppHandle, method: &str) {
+    BACKEND_RESTARTING.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = app.emit(
         "dsh-status",
         json!({ "status": "starting", "method": method }),
@@ -1626,6 +1680,7 @@ fn restart_backend(app: &AppHandle, method: &str) {
 /// 静默重启核心: 与 `restart_backend` 同一套清理+启动, 但不回 boot 页
 /// (崩溃自愈用 — 用户可能在 webchat 中, 静默恢复)。
 fn restart_backend_silent(app: &AppHandle, method: &str) {
+    BACKEND_RESTARTING.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = app.emit(
         "dsh-status",
         json!({ "status": "starting", "method": method }),

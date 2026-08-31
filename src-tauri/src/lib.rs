@@ -210,9 +210,17 @@ fn quit_dsh(app: &AppHandle) {
 
 /// 通用 MessageBox 确认弹窗(是/否), 供 dsh.rs 的更新检查等功能使用。
 /// 传入 AppHandle 以获取主窗口 HWND, 使弹窗居中于父窗口。
+/// 居中说明: MessageBoxW 从后台线程调用时, 即便传了 owner HWND, Windows 也
+/// 不保证把弹窗摆到父窗口中央(401 认证墙弹窗曾偏到屏幕角落)。这里用经典
+/// CBT hook 方案: 在调用线程装 WH_CBT 钩子, 弹窗 HCBT_ACTIVATE 时按父窗口
+/// 矩形手动居中, 再卸载钩子 —— 与线程/前台状态无关, 稳定居中。
 pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
     #[cfg(windows)]
     unsafe {
+        // 钩子回调需要跨 FFI 携带的父窗口; 弹窗创建前记录, 回调中取用。
+        static OWNER_HWND: std::sync::atomic::AtomicIsize =
+            std::sync::atomic::AtomicIsize::new(0);
+
         extern "system" {
             fn MessageBoxW(
                 hwnd: *const core::ffi::c_void,
@@ -220,7 +228,60 @@ pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
                 lp_caption: *const u16,
                 u_type: u32,
             ) -> i32;
+            fn SetWindowsHookExW(
+                idHook: i32,
+                lpfn: unsafe extern "system" fn(i32, usize, isize, isize) -> isize,
+                hmod: *const core::ffi::c_void,
+                dwThreadId: u32,
+            ) -> *mut core::ffi::c_void;
+            fn UnhookWindowsHookEx(hhk: *mut core::ffi::c_void) -> i32;
+            fn CallNextHookEx(
+                hhk: *const core::ffi::c_void,
+                nCode: i32,
+                wParam: usize,
+                lParam: isize,
+            ) -> isize;
+            fn GetWindowRectW(hwnd: *const core::ffi::c_void, lprect: *mut Rect) -> i32;
+            fn MoveWindow(
+                hwnd: *const core::ffi::c_void,
+                x: i32,
+                y: i32,
+                nWidth: i32,
+                nHeight: i32,
+                bRepaint: i32,
+            ) -> i32;
         }
+
+        #[repr(C)]
+        struct Rect {
+            left: i32,
+            top: i32,
+            right: i32,
+            bottom: i32,
+        }
+
+        const HCBT_ACTIVATE: i32 = 5;
+
+        unsafe extern "system" fn cbt_proc(code: i32, wparam: usize, _lparam: isize) -> isize {
+            if code == HCBT_ACTIVATE {
+                let dialog = wparam as *const core::ffi::c_void;
+                let owner = OWNER_HWND.load(std::sync::atomic::Ordering::Relaxed) as *const core::ffi::c_void;
+                let mut dr = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+                let mut or = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+                if !owner.is_null()
+                    && GetWindowRectW(dialog, &mut dr) != 0
+                    && GetWindowRectW(owner, &mut or) != 0
+                {
+                    let dw = dr.right - dr.left;
+                    let dh = dr.bottom - dr.top;
+                    let x = or.left + ((or.right - or.left) - dw) / 2;
+                    let y = or.top + ((or.bottom - or.top) - dh) / 2;
+                    MoveWindow(dialog, x, y, dw, dh, 0);
+                }
+            }
+            CallNextHookEx(std::ptr::null(), code, wparam, _lparam)
+        }
+
         let text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         let caption: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
         use raw_window_handle::HasWindowHandle;
@@ -235,8 +296,16 @@ pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
                 })
             })
             .unwrap_or(core::ptr::null());
+        OWNER_HWND.store(hwnd as isize, std::sync::atomic::Ordering::Relaxed);
+        // WH_CBT(5), 线程局部钩子(当前线程) — MessageBoxW 的模态循环就跑在
+        // 这个线程上, 钩子能拦到弹窗激活。
+        let hook = SetWindowsHookExW(5, cbt_proc, std::ptr::null(), 0);
         // MB_YESNO(0x4) | MB_ICONQUESTION(0x20) | MB_APPLMODAL(0) | MB_TOPMOST(0x40000)
-        MessageBoxW(hwnd, text.as_ptr(), caption.as_ptr(), 0x4 | 0x20 | 0x40000) == 6 // IDYES
+        let answer = MessageBoxW(hwnd, text.as_ptr(), caption.as_ptr(), 0x4 | 0x20 | 0x40000);
+        if !hook.is_null() {
+            UnhookWindowsHookEx(hook);
+        }
+        answer == 6 // IDYES
     }
     #[cfg(not(windows))]
     {
@@ -372,6 +441,12 @@ pub fn run() {    tauri::Builder::default()
                     // backend state so the fresh page doesn't sit on the boot
                     // spinner while the backend is actually up.
                     if !url.starts_with("about:") {
+                        // Record the shell boot page's real URL (Windows serves
+                        // at http://tauri.localhost) so navigate_shell can go
+                        // back to it from the DSH webchat origin later.
+                        if !url.starts_with("http://127.0.0.1:3080") {
+                            dsh::record_shell_url(&url);
+                        }
                         let app = webview.app_handle().clone();
                         std::thread::spawn(move || dsh::emit_current_status(&app));
                     }
