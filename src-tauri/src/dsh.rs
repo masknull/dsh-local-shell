@@ -1643,12 +1643,12 @@ pub fn restart(app: AppHandle) {
     std::thread::spawn(move || restart_backend(&app, "正在重启 dsh web"));
 }
 
-/// 冷启动统一入口: 与托盘「重启 dsh web(后端)」同一套流程 — 广播 starting →
-/// 回 boot 页 → 清理旧实例(残留/外部) → 等完全退出 → 启动链(spawn 自己的
-/// 带 token 实例)。冷启动不再走 attach 裸 URL(那会撞 dsh-remote 登录页+401
-/// 死循环), 统一为"清残留 + spawn 自己"。
+/// 冷启动: 后台已有 dsh web 在跑时直接 attach 复用(不 kill 不 spawn);
+/// 无实例时才 spawn 自己的带 token 实例。401 认证墙接管/托盘重启/崩溃自愈
+/// 才走 `restart_backend`(kill+spawn)。恢复 v2.0.2 的 attach 语义 — 用户
+/// 后台启动的 dsh 不能被壳无故杀掉。
 pub fn cold_start(app: AppHandle) {
-    std::thread::spawn(move || restart_backend(&app, "正在启动 dsh web"));
+    std::thread::spawn(move || startup(app));
 }
 
 /// Kill any process still listening on the DSH port: an attached instance we
