@@ -492,9 +492,11 @@ pub(crate) fn check_auth_wall_now(app: &AppHandle) {
                 // 的 emit_current_status 探测不到旧实例、不会 emit `ready`,
                 // 页面稳定停在《正在启动 DSH…》给用户视觉反馈(和冷启动一致)。
                 restart_backend(&app, "接管后重启 dsh web");
-                // 接管后的新实例是我们自己 spawn 的(带 token), 重置标志以便
-                // 将来再遇 attach 401 时能再次弹窗, 而非永久卡死。
-                AUTH_WALL_HANDLED.store(false, std::sync::atomic::Ordering::Relaxed);
+                // 注意: 接管后不重置 AUTH_WALL_HANDLED(保持 true)。导航新
+                // 实例的 token URL 后 on_page_load 再触发 check_auth_wall_now
+                // 时直接 return, 防止新实例因插件/重定向又 401 时再次弹窗
+                // 接管 → 无限 kill 循环。用户可手动右键「重启 dsh web(后端)」
+                // 触发新的接管流程(不走 check_auth_wall_now)。
             } else {
                 app.exit(0);
             }
@@ -1639,6 +1641,14 @@ pub fn restart(app: AppHandle) {
     // visibly underway instead of looking like a no-op.
     crate::show_main_window(&app);
     std::thread::spawn(move || restart_backend(&app, "正在重启 dsh web"));
+}
+
+/// 冷启动统一入口: 与托盘「重启 dsh web(后端)」同一套流程 — 广播 starting →
+/// 回 boot 页 → 清理旧实例(残留/外部) → 等完全退出 → 启动链(spawn 自己的
+/// 带 token 实例)。冷启动不再走 attach 裸 URL(那会撞 dsh-remote 登录页+401
+/// 死循环), 统一为"清残留 + spawn 自己"。
+pub fn cold_start(app: AppHandle) {
+    std::thread::spawn(move || restart_backend(&app, "正在启动 dsh web"));
 }
 
 /// Kill any process still listening on the DSH port: an attached instance we

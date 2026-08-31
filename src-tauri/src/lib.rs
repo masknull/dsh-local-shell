@@ -235,8 +235,8 @@ pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
                 })
             })
             .unwrap_or(core::ptr::null());
-        // MB_YESNO(0x4) | MB_ICONQUESTION(0x20) | MB_APPLMODAL(0)
-        MessageBoxW(hwnd, text.as_ptr(), caption.as_ptr(), 0x4 | 0x20) == 6 // IDYES
+        // MB_YESNO(0x4) | MB_ICONQUESTION(0x20) | MB_APPLMODAL(0) | MB_TOPMOST(0x40000)
+        MessageBoxW(hwnd, text.as_ptr(), caption.as_ptr(), 0x4 | 0x20 | 0x40000) == 6 // IDYES
     }
     #[cfg(not(windows))]
     {
@@ -434,7 +434,9 @@ pub fn run() {    tauri::Builder::default()
             // own blocking threads; both share the AppHandle. The self-update
             // check runs in parallel — the boot page's version pill narrates it.
             let lifecycle = app.handle().clone();
-            std::thread::spawn(move || dsh::startup(lifecycle));
+            // 冷启动与托盘「重启 dsh web(后端)」同一套流程(清残留+spawn 自己),
+            // 不再走 attach 裸 URL(那会撞 dsh-remote 登录页 + 401 死循环)。
+            std::thread::spawn(move || dsh::cold_start(lifecycle));
             let monitor_app = app.handle().clone();
             std::thread::spawn(move || monitor::run(monitor_app));
 
