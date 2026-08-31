@@ -222,7 +222,7 @@ pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
             std::sync::atomic::AtomicIsize::new(0);
 
         // 显式链接 user32: 依赖树里 user32.lib 不总是进入链接输入
-        // (windows 系 crate 多用 raw-dylib), 不声明会导致 GetWindowRectW
+        // (windows 系 crate 多用 raw-dylib), 不声明会导致 GetWindowRect
         // 等符号 LNK2019。
         #[link(name = "user32")]
         extern "system" {
@@ -245,7 +245,7 @@ pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
                 wParam: usize,
                 lParam: isize,
             ) -> isize;
-            fn GetWindowRectW(hwnd: *const core::ffi::c_void, lprect: *mut Rect) -> i32;
+            fn GetWindowRect(hwnd: *const core::ffi::c_void, lprect: *mut Rect) -> i32;
             fn MoveWindow(
                 hwnd: *const core::ffi::c_void,
                 x: i32,
@@ -273,8 +273,8 @@ pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
                 let mut dr = Rect { left: 0, top: 0, right: 0, bottom: 0 };
                 let mut or = Rect { left: 0, top: 0, right: 0, bottom: 0 };
                 if !owner.is_null()
-                    && GetWindowRectW(dialog, &mut dr) != 0
-                    && GetWindowRectW(owner, &mut or) != 0
+                    && GetWindowRect(dialog, &mut dr) != 0
+                    && GetWindowRect(owner, &mut or) != 0
                 {
                     let dw = dr.right - dr.left;
                     let dh = dr.bottom - dr.top;
