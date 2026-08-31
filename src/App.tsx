@@ -67,10 +67,13 @@ function App() {
       .finally(() => setRefreshing(false));
   }, []);
 
-  // Prefetch once on mount.
+  // 面板打开时才取数据(打开瞬间若有旧数据先显示, 同时刷新)。冷启动不再
+  // 预取 — 曾经 mount 即预取, 和 ready 波的刷新叠加成十几次 env_info。
   useEffect(() => {
-    refreshEnv();
-  }, [refreshEnv]);
+    if (overlay === "env") {
+      refreshEnv();
+    }
+  }, [overlay, refreshEnv]);
 
   // Registry speed probe runs once when the notfound chooser appears; the
   // faster source becomes the primary install button, the other stays as an
@@ -82,6 +85,19 @@ function App() {
       .catch(() => {});
   }, [status.status, npmProbe]);
 
+  // ready 事件是"波"式的(Rust 侧连发 10 次防丢), 每次都调 env_info 会连续
+  // 觢发十几次重探测。去抖: 波内只在静默 800ms 后刷一次。
+  const refreshEnvDebounced = useRef<number | null>(null);
+  const scheduleEnvRefresh = useCallback(() => {
+    if (refreshEnvDebounced.current !== null) {
+      window.clearTimeout(refreshEnvDebounced.current);
+    }
+    refreshEnvDebounced.current = window.setTimeout(() => {
+      refreshEnvDebounced.current = null;
+      refreshEnv();
+    }, 800);
+  }, [refreshEnv]);
+
   useEffect(() => {
     let unlistenStatus: UnlistenFn | undefined;
     let unlistenUpdate: UnlistenFn | undefined;
@@ -92,8 +108,8 @@ function App() {
       unlistenStatus = await listen<DshStatus>("dsh-status", (event) => {
         setStatus(event.payload);
         if (event.payload.status === "ready") {
-          // Rust 已(正在)将窗口导航到 webchat; 顺手刷新环境事实, 便于面板。
-          refreshEnv();
+          // Rust 已(正在)将窗口导航到 webchat; 去抖刷新环境事实(见上)。
+          scheduleEnvRefresh();
         }
       });
       unlistenUpdate = await listen<AppUpdate>("app-update", (event) => {
@@ -111,11 +127,14 @@ function App() {
 
     return () => {
       cancelled = true;
+      if (refreshEnvDebounced.current !== null) {
+        window.clearTimeout(refreshEnvDebounced.current);
+      }
       unlistenStatus?.();
       unlistenUpdate?.();
       unlistenShowEnv?.();
     };
-  }, [refreshEnv]);
+  }, [refreshEnv, scheduleEnvRefresh]);
 
   // Fuse: if the update events never arrive (very old build, IPC hiccup),
   // stop holding the handoff on `pending` — startup must never hang.

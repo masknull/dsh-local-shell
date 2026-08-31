@@ -38,15 +38,24 @@ fn dsh_install_npm(app: AppHandle, registry: Option<String>) {
 }
 
 /// Frontend-invoked registry speed probe for the install-source chooser.
+/// async + spawn_blocking: 两个 4 秒超时的网络探测绝不能占用主线程
+/// (Tauri v2 同步命令直接跑在 UI 线程上, 会把窗口冻住)。
 #[tauri::command]
-fn dsh_npm_probe() -> serde_json::Value {
-    dsh::npm_probe()
+async fn dsh_npm_probe() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(dsh::npm_probe)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Frontend-invoked environment facts for the env panel.
+/// async + spawn_blocking: env_info 里有 PowerShell 进程链查询(秒级)、
+/// 目录大小遍历(上万文件)、node --version 探测 — 曾经是同步命令, 每次
+/// ready 事件波都把主线程冻住数秒(窗口"未响应"的直接原因)。
 #[tauri::command]
-fn env_info(app: AppHandle) -> serde_json::Value {
-    dsh::env_info(&app)
+async fn env_info(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || dsh::env_info(&app))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Frontend-invoked "open this directory in Explorer" for env-panel paths.
@@ -80,47 +89,52 @@ fn app_full_restart(app: AppHandle) {
 /// One-paste AI context: env facts + this session's log as a markdown
 /// bundle, saved beside the log and returned so the panel can also put it
 /// on the clipboard. Solves "AI has to hunt through the whole DSH install".
+/// async + spawn_blocking: 同 env_info, 重组件不能冻结主线程。
 #[tauri::command]
-fn diagnostic_export(app: AppHandle) -> Result<serde_json::Value, String> {
-    let (date, time, stamp) = dsh::local_time_parts();
-    let info = dsh::env_info(&app);
-    let version = app.package_info().version.to_string();
-    let exe = tauri::utils::platform::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    let log_dir = dsh::shell_data_dir();
-    let session_log = std::fs::read_to_string(log_dir.join("dsh.log"))
-        .unwrap_or_else(|_| "(读取失败)".to_string());
+async fn diagnostic_export(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (date, time, stamp) = dsh::local_time_parts();
+        let info = dsh::env_info(&app);
+        let version = app.package_info().version.to_string();
+        let exe = tauri::utils::platform::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let log_dir = dsh::shell_data_dir();
+        let session_log = std::fs::read_to_string(log_dir.join("dsh.log"))
+            .unwrap_or_else(|_| "(读取失败)".to_string());
 
-    let mut content = String::new();
-    content.push_str("# DSH Desktop 诊断包\n\n");
-    content.push_str(&format!("- 生成时间: {date} {time}\n"));
-    content.push_str(&format!("- 应用: v{version} ({exe})\n"));
-    content.push_str(&format!("- 日志目录: {}\n\n", log_dir.display()));
-    content.push_str("## 环境配置 (env_info)\n\n");
-    content.push_str("```json\n");
-    content.push_str(
-        &serde_json::to_string_pretty(&info).unwrap_or_else(|_| "{}".to_string()),
-    );
-    content.push_str("\n```\n\n");
-    content.push_str("## 本次会话日志 (dsh.log,仅壳事件)\n\n");
-    content.push_str("~~~text\n");
-    content.push_str(&session_log);
-    content.push_str("\n~~~\n");
+        let mut content = String::new();
+        content.push_str("# DSH Desktop 诊断包\n\n");
+        content.push_str(&format!("- 生成时间: {date} {time}\n"));
+        content.push_str(&format!("- 应用: v{version} ({exe})\n"));
+        content.push_str(&format!("- 日志目录: {}\n\n", log_dir.display()));
+        content.push_str("## 环境配置 (env_info)\n\n");
+        content.push_str("```json\n");
+        content.push_str(
+            &serde_json::to_string_pretty(&info).unwrap_or_else(|_| "{}".to_string()),
+        );
+        content.push_str("\n```\n\n");
+        content.push_str("## 本次会话日志 (dsh.log,仅壳事件)\n\n");
+        content.push_str("~~~text\n");
+        content.push_str(&session_log);
+        content.push_str("\n~~~\n");
 
-    let path = log_dir.join(format!("diagnostics-{stamp}.md"));
-    std::fs::create_dir_all(&log_dir)
-        .and_then(|_| std::fs::write(&path, &content))
-        .map_err(|e| format!("诊断包写入失败:{e}"))?;
-    dsh::log_write(
-        dsh::LogLevel::Info,
-        &format!("[dsh-desktop] diagnostic bundle exported: {}", path.display()),
-    );
-    Ok(serde_json::json!({
-        "path": path.display().to_string(),
-        "dir": log_dir.display().to_string(),
-        "content": content,
-    }))
+        let path = log_dir.join(format!("diagnostics-{stamp}.md"));
+        std::fs::create_dir_all(&log_dir)
+            .and_then(|_| std::fs::write(&path, &content))
+            .map_err(|e| format!("诊断包写入失败:{e}"))?;
+        dsh::log_write(
+            dsh::LogLevel::Info,
+            &format!("[dsh-desktop] diagnostic bundle exported: {}", path.display()),
+        );
+        Ok(serde_json::json!({
+            "path": path.display().to_string(),
+            "dir": log_dir.display().to_string(),
+            "content": content,
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Tray「环境信息」: show the window and open the env overlay. The shell stays
@@ -217,9 +231,11 @@ fn quit_dsh(app: &AppHandle) {
 pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
     #[cfg(windows)]
     unsafe {
-        // 钩子回调需要跨 FFI 携带的父窗口; 弹窗创建前记录, 回调中取用。
-        static OWNER_HWND: std::sync::atomic::AtomicIsize =
-            std::sync::atomic::AtomicIsize::new(0);
+        // 钩子回调需要跨 FFI 携带的父窗口矩形; 弹窗创建前记录, 回调中取用。
+        // 用 Tauri 的窗口 bounds(逻辑像素 × DPI 缩放 = 物理像素), 不在回调里
+        // 查 HWND —— WebView2 宿主线程外查 owner HWND 的 GetWindowRect 可能失败。
+        static OWNER_RECT: std::sync::Mutex<(i32, i32, i32, i32)> =
+            std::sync::Mutex::new((0, 0, 0, 0));
 
         // 显式链接 user32: 依赖树里 user32.lib 不总是进入链接输入
         // (windows 系 crate 多用 raw-dylib), 不声明会导致 GetWindowRect
@@ -254,6 +270,7 @@ pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
                 nHeight: i32,
                 bRepaint: i32,
             ) -> i32;
+            fn GetCurrentThreadId() -> u32;
         }
 
         #[repr(C)]
@@ -269,17 +286,13 @@ pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
         unsafe extern "system" fn cbt_proc(code: i32, wparam: usize, _lparam: isize) -> isize {
             if code == HCBT_ACTIVATE {
                 let dialog = wparam as *const core::ffi::c_void;
-                let owner = OWNER_HWND.load(std::sync::atomic::Ordering::Relaxed) as *const core::ffi::c_void;
+                let (l, t, r, b) = *OWNER_RECT.lock().unwrap_or_else(|e| e.into_inner());
                 let mut dr = Rect { left: 0, top: 0, right: 0, bottom: 0 };
-                let mut or = Rect { left: 0, top: 0, right: 0, bottom: 0 };
-                if !owner.is_null()
-                    && GetWindowRect(dialog, &mut dr) != 0
-                    && GetWindowRect(owner, &mut or) != 0
-                {
+                if r > l && b > t && GetWindowRect(dialog, &mut dr) != 0 {
                     let dw = dr.right - dr.left;
                     let dh = dr.bottom - dr.top;
-                    let x = or.left + ((or.right - or.left) - dw) / 2;
-                    let y = or.top + ((or.bottom - or.top) - dh) / 2;
+                    let x = l + ((r - l) - dw) / 2;
+                    let y = t + ((b - t) - dh) / 2;
                     MoveWindow(dialog, x, y, dw, dh, 0);
                 }
             }
@@ -300,10 +313,27 @@ pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
                 })
             })
             .unwrap_or(core::ptr::null());
-        OWNER_HWND.store(hwnd as isize, std::sync::atomic::Ordering::Relaxed);
-        // WH_CBT(5), 线程局部钩子(当前线程) — MessageBoxW 的模态循环就跑在
-        // 这个线程上, 钩子能拦到弹窗激活。
-        let hook = SetWindowsHookExW(5, cbt_proc, std::ptr::null(), 0);
+        // 主窗口物理像素矩形: Tauri 的逻辑坐标 × DPI 缩放。
+        let owner_rect = app
+            .get_webview_window("main")
+            .map(|w| {
+                let scale = w.scale_factor().unwrap_or(1.0);
+                let pos = w.outer_position().unwrap_or_default();
+                let size = w.outer_size().unwrap_or_default();
+                let (x, y) = (pos.x as f64 * scale, pos.y as f64 * scale);
+                (
+                    x as i32,
+                    y as i32,
+                    x as i32 + (size.width as f64 * scale) as i32,
+                    y as i32 + (size.height as f64 * scale) as i32,
+                )
+            })
+            .unwrap_or((0, 0, 0, 0));
+        *OWNER_RECT.lock().unwrap_or_else(|e| e.into_inner()) = owner_rect;
+        // WH_CBT(5), 线程局部钩子: dwThreadId 必须传「当前线程ID」。
+        // 传 0 = 全局钩子, 而全局钩子要求 hMod 是 DLL 模块句柄, NULL 时
+        // SetWindowsHookExW 直接失败(弹窗不居中的根因)。
+        let hook = SetWindowsHookExW(5, cbt_proc, std::ptr::null(), GetCurrentThreadId());
         // MB_YESNO(0x4) | MB_ICONQUESTION(0x20) | MB_APPLMODAL(0) | MB_TOPMOST(0x40000)
         let answer = MessageBoxW(hwnd, text.as_ptr(), caption.as_ptr(), 0x4 | 0x20 | 0x40000);
         if !hook.is_null() {

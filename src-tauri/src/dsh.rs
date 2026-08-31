@@ -196,9 +196,27 @@ fn no_open_suffix(dsh_path: &str) -> &'static str {
             }
         }
     }
+    // 磁盘缓存: `dsh web --help` 探测实测可耗 9 秒, 每次冷启动都来一遍
+    // 显得"又慢又重"。按解析到的 dsh 路径把结果持久进 settings.json,
+    // 升级 dsh 后若行为变化, 删除 settings.json 的 noOpenCache 即可重探。
+    if let Some(supported) = read_settings()
+        .get("noOpenCache")
+        .and_then(|m| m.get(dsh_path))
+        .and_then(Value::as_bool)
+    {
+        if let Ok(mut cache) = CACHE.lock() {
+            *cache = Some((dsh_path.to_string(), supported));
+        }
+        return if supported { " --no-open" } else { "" };
+    }
     let supported = web_help_mentions_no_open(dsh_path);
     if let Ok(mut cache) = CACHE.lock() {
         *cache = Some((dsh_path.to_string(), supported));
+    }
+    {
+        let mut settings = read_settings();
+        settings["noOpenCache"][dsh_path] = json!(supported);
+        write_settings(settings);
     }
     if supported {
         supervision_log(&format!(
@@ -375,6 +393,7 @@ fn navigate_webchat(app: &AppHandle, spawned: bool) {
             }
             std::thread::sleep(Duration::from_millis(400));
         }
+        supervision_log("[nav] token 行未在控制台尾出现, 回退裸 URL(新版dsh将401;认证墙流程会用token重导航)");
     }
     navigate_main(app, DSH_BASE);
 }
@@ -514,6 +533,34 @@ pub(crate) fn check_auth_wall_now(app: &AppHandle) {
             // invocation must not stack a second prompt.
             if AUTH_WALL_HANDLED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 return;
+            }
+            // 自启实例撞 401 = 我们 spawn 的 dsh web 的 token 行没被及时捕获,
+            // 导航落在了裸 URL 上(新版 dsh 的 token 认证对裸 URL 一律 401)。
+            // 这不是"实例不是本应用启动的", 杀掉重启毫无意义(还会被用户看成
+            // "node 启动几秒后被杀又重启"): 直接轮询控制台尾拿 token 重新导航。
+            let owned = app
+                .state::<DshState>()
+                .inner
+                .lock()
+                .map(|g| g.is_some())
+                .unwrap_or(false);
+            if owned {
+                log_write(
+                    LogLevel::Info,
+                    "[auth-wall] 自启实例出现401页(token未命中): 用控制台尾的token重新导航, 不杀进程",
+                );
+                for _ in 0..25 {
+                    if let Some(url) = resolve_launch_url() {
+                        navigate_main(&app, &url);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(400));
+                }
+                log_write(
+                    LogLevel::Warn,
+                    "[auth-wall] 10秒内token仍未出现, 回退到接管弹窗(重启后重试捕获)",
+                );
+                AUTH_WALL_HANDLED.store(false, std::sync::atomic::Ordering::Relaxed);
             }
             let take_over = crate::prompt_yes_no(
                 &app,
@@ -1279,6 +1326,12 @@ fn dir_size_bounded(dir: &Path) -> Option<u64> {
     Some(total)
 }
 
+/// node --version 会话级缓存: env_info 每次都 spawn 一个存活不到 1 秒的
+/// node 探测进程 — ready 事件波会连续触发十几次 env_info, 任务管理器里
+/// 看起来就是"node 反复启动退出"(用户误判为 dsh 被杀重启)。node 版本在
+/// 会话内不会变, 探一次即缓存。
+static NODE_VERSION: Mutex<Option<String>> = Mutex::new(None);
+
 /// Environment facts for the env panel, modelled on Comfy Desktop's
 /// StatusFactPanel data shape: every field is gathered independently and
 /// degrades to null — the panel never hangs on a probe.
@@ -1288,6 +1341,13 @@ pub fn env_info(app: &AppHandle) -> Value {
     let install_dir = tauri::utils::platform::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|p| p.display().to_string()));
+    let node_version = {
+        let mut cache = NODE_VERSION.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.is_none() {
+            *cache = run_capture("node", &["--version"]);
+        }
+        cache.clone().map(Value::String).unwrap_or(Value::Null)
+    };
     let info = json!({
         "app": {
             "version": app.package_info().version.to_string(),
@@ -1305,7 +1365,7 @@ pub fn env_info(app: &AppHandle) -> Value {
         },
         "node": {
             "path": where_first("node"),
-            "version": run_capture("node", &["--version"]),
+            "version": node_version,
         },
         "plugins": profile_plugin_versions(),
         "profileDir": profile_dir.display().to_string(),
@@ -1390,7 +1450,10 @@ pub fn set_custom_path(app: &AppHandle, raw: String) -> Result<(), String> {
     let mut settings = read_settings();
     settings["customDshPath"] = json!(path);
     write_settings(settings);
-    teardown(app);
+    // 与托盘「重启 dsh web」同一套清理: teardown + 清端口 + 等退净,
+    // 避免新链在旧实例仍占着 3080 时把"旧实例应答"误判为"新子进程就绪"。
+    stop_backend(app);
+    wait_for_backend_stop();
     let app2 = app.clone();
     std::thread::spawn(move || startup(app2));
     Ok(())
@@ -1503,11 +1566,17 @@ pub fn install_global_npm(app: AppHandle, registry: Option<&str>) {
     });
 }
 
-/// Re-arm after a failure: tear down any stale owned subprocess, then startup.
+/// Re-arm after a failure: same cleanup as the tray restart (teardown + clear
+/// port 3080 + wait for full exit), then startup. Without the port cleanup a
+/// stale instance still answering on 3080 makes try_candidate mistake the old
+/// server's readiness for the freshly spawned child's.
 pub fn retry(app: AppHandle) {
-    teardown(&app);
     let app2 = app.clone();
-    std::thread::spawn(move || startup(app2));
+    std::thread::spawn(move || {
+        stop_backend(&app2);
+        wait_for_backend_stop();
+        startup(app2);
+    });
 }
 
 // ── 检查更新(DSH CLI 自身): npm registry 最新版 vs 当前 dsh --version ──────
@@ -1619,21 +1688,23 @@ pub fn check_update(app: AppHandle) {
 /// run exactly that candidate now.
 pub fn download_and_start(app: AppHandle) {
     save_prefer_npx(true);
-    teardown(&app);
-    let app2 = app.clone();
     std::thread::spawn(move || {
+        // 与托盘重启同一套清理(见 retry): 3080 上若还有旧实例应答,
+        // try_candidate 会把旧实例的就绪误记在新子进程头上。
+        stop_backend(&app);
+        wait_for_backend_stop();
         let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string());
         let cwd = std::env::var("DSH_CWD")
             .ok()
             .filter(|dir| Path::new(dir).is_dir())
             .unwrap_or(home);
         let candidate = npx_candidate(cwd);
-        let _ = app2.emit(
+        let _ = app.emit(
             "dsh-status",
             json!({ "status": "starting", "method": candidate.label }),
         );
-        if let Attempt::Failed(reason) = try_candidate(&app2, &candidate) {
-            let _ = app2.emit(
+        if let Attempt::Failed(reason) = try_candidate(&app, &candidate) {
+            let _ = app.emit(
                 "dsh-status",
                 json!({
                     "status": "error",
@@ -1654,6 +1725,7 @@ pub fn download_and_start(app: AppHandle) {
 /// stale attached backend behind meant plugins announcing 「重启后生效」
 /// never actually loaded (2026-08-19 report).
 pub fn stop_backend(app: &AppHandle) {
+    supervision_log("[backend] 重启清理: 回boot页 + teardown + 清理3080监听者");
     // Return the shell to its boot page first; startup() will navigate back
     // to the webchat once the backend is ready again.
     navigate_shell(app);
@@ -1698,12 +1770,12 @@ pub fn restart(app: AppHandle) {
     std::thread::spawn(move || restart_backend(&app, "正在重启 dsh web"));
 }
 
-/// 冷启动统一入口: 与托盘「重启 dsh web(后端)」同一套流程 — 广播 starting →
-/// 回 boot 页 → 清理旧实例(残留/外部) → 等完全退出 → 启动链(spawn 自己的
-/// 带 token 实例)。冷启动不再走 attach 裸 URL(那会撞 dsh-remote 登录页+401
-/// 死循环), 统一为"清残留 + spawn 自己"。
+/// 冷启动: 恢复 v2.0.2 的 attach 语义 — 先探测 3080, 已有实例(上次退出壳时
+/// 保留的 dsh web / 用户自启的)直接复用, 不杀不启; 端口空着才走启动链拉起
+/// 自己的带 token 实例。曾经把冷启动统一成 restart_backend(杀+启)会杀掉
+/// 健康的既有实例, 还让新实例撞残留状态崩溃 → 自愈循环反复杀 node。
 pub fn cold_start(app: AppHandle) {
-    std::thread::spawn(move || restart_backend(&app, "正在启动 dsh web"));
+    std::thread::spawn(move || startup(app));
 }
 
 /// Kill any process still listening on the DSH port: an attached instance we
