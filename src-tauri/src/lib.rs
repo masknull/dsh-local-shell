@@ -230,7 +230,7 @@ pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
             ) -> i32;
             fn SetWindowsHookExW(
                 idHook: i32,
-                lpfn: unsafe extern "system" fn(i32, usize, isize, isize) -> isize,
+                lpfn: unsafe extern "system" fn(i32, usize, isize) -> isize,
                 hmod: *const core::ffi::c_void,
                 dwThreadId: u32,
             ) -> *mut core::ffi::c_void;
