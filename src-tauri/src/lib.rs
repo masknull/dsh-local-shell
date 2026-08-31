@@ -221,6 +221,10 @@ pub(crate) fn prompt_yes_no(app: &AppHandle, title: &str, text: &str) -> bool {
         static OWNER_HWND: std::sync::atomic::AtomicIsize =
             std::sync::atomic::AtomicIsize::new(0);
 
+        // 显式链接 user32: 依赖树里 user32.lib 不总是进入链接输入
+        // (windows 系 crate 多用 raw-dylib), 不声明会导致 GetWindowRectW
+        // 等符号 LNK2019。
+        #[link(name = "user32")]
         extern "system" {
             fn MessageBoxW(
                 hwnd: *const core::ffi::c_void,
