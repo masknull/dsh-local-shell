@@ -491,7 +491,7 @@ pub(crate) fn check_auth_wall_now(app: &AppHandle) {
                 // 初始态即《正在启动 DSH…》, 端口已清后 on_page_load 触发
                 // 的 emit_current_status 探测不到旧实例、不会 emit `ready`,
                 // 页面稳定停在《正在启动 DSH…》给用户视觉反馈(和冷启动一致)。
-                restart_backend(&app, "接管后重启 dsh web", true);
+                restart_backend(&app, "接管后重启 dsh web");
                 // 注意: 接管后不重置 AUTH_WALL_HANDLED(保持 true)。导航新
                 // 实例的 token URL 后 on_page_load 再触发 check_auth_wall_now
                 // 时直接 return, 防止新实例因插件/重定向又 401 时再次弹窗
@@ -1609,27 +1609,14 @@ pub fn stop_backend(app: &AppHandle) {
 }
 
 /// 统一的后端重启核心：所有"杀旧实例+重新启动"的入口(托盘「重启 dsh web」、
-/// 401 认证墙接管、冷启动)都走这一条, 保证顺序与反馈一致。
-/// 顺序: 广播 starting → 先清 3080(teardown+kill) → (可选回 boot 页) →
-/// 等完全退出 → 启动链。
-/// `navigate_boot`: 重启/接管需要从 webchat/401 页回 boot 页展示《正在启动
-/// DSH…》; 冷启动窗口本就停在 boot 页, 传 false 避免初始化阶段重复导航白屏。
-fn restart_backend(app: &AppHandle, method: &str, navigate_boot: bool) {
+/// 401 认证墙接管、崩溃自愈)都走这一条, 保证顺序与反馈一致。
+/// 顺序: 广播 starting → 回 boot 页 → 清理旧实例 → 等完全退出 → 启动链。
+fn restart_backend(app: &AppHandle, method: &str) {
     let _ = app.emit(
         "dsh-status",
         json!({ "status": "starting", "method": method }),
     );
-    // kill-first: 先清 3080 再回 boot 页, 避免 boot 页加载时
-    // emit_current_status 探测到旧实例仍在而 emit `ready` → 显示"正在打开…"
-    // 而非"正在启动 DSH…"。
-    teardown(app);
-    kill_port_listeners();
-    if navigate_boot {
-        navigate_shell(app);
-        // 最小反馈时间: 确保 boot 页《正在启动 DSH…》稳定展示(自启/接管时
-        // DSH 可能启动很快, 不加反馈会一闪而过)。
-        std::thread::sleep(Duration::from_millis(800));
-    }
+    stop_backend(app);
     // 等旧实例完全退出(端口释放 + 进程树收尾)再启动, 避免新实例撞上
     // 旧残留(usage-billing writer / TIME_WAIT / 锁文件)而崩溃。
     wait_for_backend_stop();
@@ -1653,15 +1640,15 @@ pub fn restart(app: AppHandle) {
     // Pop the window first so a restart triggered while hidden in the tray is
     // visibly underway instead of looking like a no-op.
     crate::show_main_window(&app);
-    std::thread::spawn(move || restart_backend(&app, "正在重启 dsh web", true));
+    std::thread::spawn(move || restart_backend(&app, "正在重启 dsh web"));
 }
 
 /// 冷启动统一入口: 与托盘「重启 dsh web(后端)」同一套流程 — 广播 starting →
-/// 清理旧实例(残留/外部) → 等完全退出 → 启动链(spawn 自己的带 token 实例)。
-/// 冷启动窗口本就停在 boot 页, 不再重复 navigate_shell(避免初始化阶段白屏),
-/// 也不再走 attach 裸 URL(那会撞 dsh-remote 登录页+401 死循环)。
+/// 回 boot 页 → 清理旧实例(残留/外部) → 等完全退出 → 启动链(spawn 自己的
+/// 带 token 实例)。冷启动不再走 attach 裸 URL(那会撞 dsh-remote 登录页+401
+/// 死循环), 统一为"清残留 + spawn 自己"。
 pub fn cold_start(app: AppHandle) {
-    std::thread::spawn(move || restart_backend(&app, "正在启动 dsh web", false));
+    std::thread::spawn(move || restart_backend(&app, "正在启动 dsh web"));
 }
 
 /// Kill any process still listening on the DSH port: an attached instance we
