@@ -1,7 +1,9 @@
 name: build dsh-local-shell (shell)
 
-# 自动链第 1 段: 构建主程序并发布到 Releases v2.0.3。
-# 触发: 壳/前端/构建配置变更。产物自动上传 Release 的 dsh-local-shell.exe。
+# 自动链第 1 段: 构建主程序并发布到一个全新的 patch Release。
+# 触发: 壳/前端/构建配置变更(push main)。版本号自动递增: 以最新 Release
+# tag 为基准 patch +1, 构建时写入 tauri.conf.json(不回写仓库),
+# 旧 Release 永不被覆盖。
 
 on:
   workflow_dispatch:
@@ -39,6 +41,29 @@ jobs:
       - name: pnpm install
         run: pnpm install --no-frozen-lockfile --config.dangerously-allow-all-builds=true
 
+      - name: bump version (latest release tag + 0.0.1, in-memory only)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 版本真源 = 最新 Release tag; 构建前 patch+1 写入 tauri.conf.json
+          # (运行时版本/产物元数据都取自它)。只做正则替换不重排 JSON,
+          # 且绝不回写仓库 —— 回写会再次命中触发路径造成死循环。
+          $latest = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>$null
+          if (-not $latest) {
+            # 仓库尚无 Release: 以 tauri.conf.json 里的版本为基线
+            $latest = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          }
+          $latest = $latest.Trim().TrimStart('v')
+          $parts = $latest.Split('.')
+          $parts[-1] = [string]([int]$parts[-1] + 1)
+          $next = $parts -join '.'
+          $text = Get-Content src-tauri/tauri.conf.json -Raw
+          $text = $text -replace '"version":\s*"[^"]+"', ('"version": "' + $next + '"')
+          [IO.File]::WriteAllText("$PWD/src-tauri/tauri.conf.json", $text)
+          "NEXT_VERSION=$next" >> $env:GITHUB_ENV
+          "build as v$next (latest release was v$latest)"
+
       - name: build shell exe (tauri release)
         run: pnpm tauri build --no-bundle
 
@@ -54,15 +79,18 @@ jobs:
           path: dsh-local-shell.exe
           if-no-files-found: error
 
-      - name: publish shell exe to Releases v2.0.3 (auto chain)
+      - name: publish shell exe to a NEW patch release (older tags are never touched)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v2.0.3 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload v2.0.3 dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" --clobber
+          TAG="v${NEXT_VERSION}"
+          echo "publishing shell to $TAG"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create v2.0.3 dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" \
-              --title "dsh-local-shell v2.0.3" \
-              --notes "DeepSeek Harness local shell (auto-built)" || gh release upload v2.0.3 dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" --clobber
+            gh release create "$TAG" dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" \
+              --title "dsh-local-shell $TAG" \
+              --notes "DeepSeek Harness local shell (auto-built; latest release + 0.0.1)" \
+              || gh release upload "$TAG" dsh-local-shell.exe --repo "$GITHUB_REPOSITORY" --clobber
           fi

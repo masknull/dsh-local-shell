@@ -1,8 +1,8 @@
 name: build dsh-local-shell installer
 
-# 自动链第 2 段: 构建自包含 GUI 安装器并发布到 Releases v2.0.3。
-# 壳 exe 从 Release v2.0.3 获取(容器构建会先把壳发布出来; 若尚未就绪则
-# 轮询等待 shell workflow 完成), 全程无需手动介入。
+# 自动链第 2 段: 构建自包含 GUI 安装器并发布到 shell 刚创建的同一个 Release。
+# 壳 exe 等待「与本次 commit 相同的 shell workflow run」成功后, 从其刚发布的
+# 最新 Release 获取(必是本次构建而非旧版), 全程无需手动介入。
 
 on:
   workflow_dispatch:
@@ -21,33 +21,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: wait for shell release then fetch dsh-local-shell.exe (auto chain)
+      - name: wait for THIS commit's shell build then fetch dsh-local-shell.exe (auto chain)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 1) 若 Release 已有壳, 直接用
-          if gh release download v2.0.3 --repo "$GITHUB_REPOSITORY" \
-               --pattern "dsh-local-shell.exe" --dir . --clobber 2>/dev/null && [ -f dsh-local-shell.exe ]; then
-            echo "shell exe already in release"
-          else
-            # 2) 否则等待 shell workflow 完成并发布(自动链)
-            echo "shell release not ready; waiting for the shell workflow..."
-            for i in $(seq 1 90); do
-              out=$(gh run list --repo "$GITHUB_REPOSITORY" --limit 50 \
-                    --json databaseId,conclusion,name \
-                    --jq '[.[]|select(.name=="build dsh-local-shell (shell)" and .status=="completed")][0].conclusion' 2>/dev/null || true)
-              if [ -f dsh-local-shell.exe ] || { gh release download v2.0.3 --repo "$GITHUB_REPOSITORY" --pattern "dsh-local-shell.exe" --dir . --clobber 2>/dev/null && [ -f dsh-local-shell.exe ]; }; then
-                echo "shell exe fetched"
+          # 等待与本次 commit 完全相同的 shell workflow run 成功后, 从它刚
+          # 发布的最新 Release 下载壳 exe。旧逻辑「Release 上有资产就直接
+          # 用」会抓到上一版的旧 exe(2026-09-10 实测: 安装器打包了老版本
+          # 壳)。壳资产只在本次 shell run 成功后才被写入新 tag, 下载即本次
+          # 构建无误。
+          sha="$GITHUB_SHA"
+          status=""
+          for i in $(seq 1 180); do
+            status=$(gh run list --repo "$GITHUB_REPOSITORY" \
+                  --workflow build-shell.yml --limit 30 \
+                  --json headSha,status \
+                  --jq "[.[] | select(.headSha==\"$sha\")][0].status" 2>/dev/null || true)
+            if [ "$status" = "completed" ]; then
+              conclusion=$(gh run list --repo "$GITHUB_REPOSITORY" \
+                  --workflow build-shell.yml --limit 30 \
+                  --json headSha,conclusion \
+                  --jq "[.[] | select(.headSha==\"$sha\")][0].conclusion" 2>/dev/null || true)
+              if [ "$conclusion" = "success" ]; then
+                echo "shell workflow succeeded for $sha"
                 break
               fi
-              if [ "$out" = "failure" ] || [ "$out" = "cancelled" ]; then
-                echo "shell workflow ended with $out"
-                exit 1
-              fi
-              sleep 10
-            done
-          fi
+              echo "shell workflow ended with: $conclusion"
+              exit 1
+            fi
+            sleep 10
+          done
+          [ "$status" = "completed" ] || { echo "timed out waiting for the shell workflow"; exit 1; }
+          TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          echo "downloading shell exe from $TAG"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "dsh-local-shell.exe" --dir . --clobber
           test -f dsh-local-shell.exe || { echo "failed to obtain dsh-local-shell.exe"; exit 1; }
           mkdir -p installer/assets
           mv dsh-local-shell.exe installer/assets/dsh-local-shell.exe
@@ -70,15 +79,19 @@ jobs:
           path: dsh-local-shell-install.exe
           if-no-files-found: error
 
-      - name: publish installer exe to Releases v2.0.3 (auto chain)
+      - name: publish installer exe to the same new release (auto chain)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          echo "publishing installer to $TAG"
           for i in $(seq 1 60); do
-            if gh release view v2.0.3 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              gh release upload v2.0.3 dsh-local-shell-install.exe --repo "$GITHUB_REPOSITORY" --clobber
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release upload "$TAG" dsh-local-shell-install.exe --repo "$GITHUB_REPOSITORY" --clobber
               break
             fi
             sleep 10
           done
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || { echo "release $TAG never appeared"; exit 1; }

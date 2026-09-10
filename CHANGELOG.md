@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.0.4 — 2026-09-10
+
+**审计整改 + 功能裁剪**(全量安全审计后按结论处置;**CI 版本号改为自动递增**):
+
+- **settings.json 解析加固**:文件为「合法 JSON 但非对象」(如 `[]`/`123`,手编或第三方工具所致)时,启动链的键写入会 panic(release `panic=abort`)→ 冷启动反复闪退;现在读取一律归一为对象,`noOpenCache` 双层写入前先归一子键
+- **移除托盘「检查更新(DSH)」**:GUI PATH 下裸 `dsh --version` 解析不到(2026-08-18 已知问题,该功能从未可用);顺带消除 registry 版本串未校验直接拼 `cmd /S /C` 的注入面。更新 DSH 本体请手动 `npm install -g @deepseek-ai/dsh@latest`
+- **移除休眠的 exe 自更新 + 插件同步死代码**(自「无独立 Release 渠道」改版后零调用点):其镜像下载在 digest 缺失时仅校验字节数、pnpm 冷却期被 `minimumReleaseAge=0` 显式归零,重新接线即踩雷——整体删除;托盘「前后端重启」不受影响
+- **WebView GitHub 镜像改写不再覆盖 `api.github.com`**:API 响应(版本/校验数据)与可能的凭据头一律直连,仅镜像 release 静态资源域
+- **移除托盘「环境信息」入口**:环境管理面板保留(点标题栏名字打开),托盘菜单精简为 打开主界面/重启 dsh web(后端)/前后端重启/退出壳
+- **CI 修复与自动化**:installer 工作流曾直接抓 Release 上已有的旧壳资产(实测打包了老版本壳);现改为等待**本次 commit** 的 shell workflow 成功后再从其刚创建的最新 Release 下载;发布 tag 从硬编码改为**自动递增**——每次 push 到 main,以最新 Release tag 为基准 patch +1(构建时写入 tauri.conf.json,不回写仓库),旧 Release 永不覆盖;三处版本号(1.6.8/2.0.3 脱节)就此对齐
+
+Audit remediations + feature trims (v2.0.4):
+
+- Harden settings.json parsing (non-object legal JSON no longer panics the cold start)
+- Remove the never-working tray check-update flow (GUI PATH resolution + its cmd-injection surface); update DSH manually via `npm install -g @deepseek-ai/dsh@latest`
+- Remove the dormant exe self-update + plugin-sync dead code (size-only integrity fallback, cooldown bypass)
+- Stop mirroring api.github.com through the public proxy (API responses stay direct)
+- Remove the tray env-info entry (the env panel stays on titlebar click)
+- CI: the installer now waits for THIS commit's shell build; release tags auto-increment per push (latest tag + 0.0.1, old releases never touched)
+
 ## v2.0.3 — 2026-08-30
 
 适配:**DSH v0.1.2-alpha.1 起的浏览器令牌认证**(dsh web 在启动输出打印一次性进程令牌 URL;无令牌访问 `/` 返回 401 `dsh web authentication required`;令牌只存在于启动该 DSH 的进程内存与启动输出中,无任何查询/落盘接口)。**以 v2.0.2 为基线重做**,吸取 v2.0.3 首版适配教训(启动器变重、右键重启不可用),保持轻量:
