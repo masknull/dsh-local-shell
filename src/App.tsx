@@ -101,7 +101,6 @@ function App() {
   useEffect(() => {
     let unlistenStatus: UnlistenFn | undefined;
     let unlistenUpdate: UnlistenFn | undefined;
-    let unlistenShowEnv: UnlistenFn | undefined;
     let cancelled = false;
 
     (async () => {
@@ -115,13 +114,9 @@ function App() {
       unlistenUpdate = await listen<AppUpdate>("app-update", (event) => {
         setUpdate(event.payload);
       });
-      unlistenShowEnv = await listen("show-env", () => {
-        setOverlay("env");
-      });
       if (cancelled) {
         unlistenStatus();
         unlistenUpdate();
-        unlistenShowEnv();
       }
     })();
 
@@ -132,7 +127,6 @@ function App() {
       }
       unlistenStatus?.();
       unlistenUpdate?.();
-      unlistenShowEnv?.();
     };
   }, [refreshEnv, scheduleEnvRefresh]);
 

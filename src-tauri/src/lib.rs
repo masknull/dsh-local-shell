@@ -137,13 +137,6 @@ async fn diagnostic_export(app: AppHandle) -> Result<serde_json::Value, String> 
     .map_err(|e| e.to_string())?
 }
 
-/// Tray「环境信息」: show the window and open the env overlay. The shell stays
-/// loaded next to the webchat iframe, so this is a plain event — no navigation.
-fn open_env_page(app: &AppHandle) {
-    show_main_window(app);
-    let _ = app.emit("show-env", ());
-}
-
 /// Frontend-invoked custom dsh path from the notfound dialog: validates it
 /// exists, persists it, and retries startup with it leading the chain.
 #[tauri::command]
@@ -504,11 +497,8 @@ pub fn run() {    tauri::Builder::default()
             let restart = MenuItem::with_id(app, "restart", "重启 dsh web(后端)", true, None::<&str>)?;
             let restart_app_item =
                 MenuItem::with_id(app, "restart-app", "前后端重启", true, None::<&str>)?;
-            let env = MenuItem::with_id(app, "env", "环境信息", true, None::<&str>)?;
-            let check_update =
-                MenuItem::with_id(app, "check-update", "检查更新(DSH)", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出壳(DSH 保持运行)", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &restart, &restart_app_item, &env, &check_update, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &restart, &restart_app_item, &quit])?;
 
             TrayIconBuilder::with_id("main-tray")
                 .icon(
@@ -524,8 +514,6 @@ pub fn run() {    tauri::Builder::default()
                     "open" => show_main_window(app),
                     "restart" => dsh::restart(app.clone()),
                     "restart-app" => update::restart_app(app),
-                    "env" => open_env_page(app),
-                    "check-update" => dsh::check_update(app.clone()),
                     "quit" => quit_dsh(app),
                     _ => {}
                 })

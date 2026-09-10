@@ -215,6 +215,11 @@ fn no_open_suffix(dsh_path: &str) -> &'static str {
     }
     {
         let mut settings = read_settings();
+        // noOpenCache 子键可能是历史坏数据(非对象): immutable 索引对非对象
+        // 返回 Null, 不会 panic; 先归一再做双层可变赋值。
+        if !settings["noOpenCache"].is_object() {
+            settings["noOpenCache"] = json!({});
+        }
         settings["noOpenCache"][dsh_path] = json!(supported);
         write_settings(settings);
     }
@@ -307,6 +312,11 @@ fn read_settings() -> Value {
     std::fs::read_to_string(settings_path())
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        // 合法 JSON 但顶层不是对象(如 `[]`/`123`, 手编或第三方工具所致)一律
+        // 归一为空对象: 下方写路径的键赋值(IndexMut)对非对象 panic, 而
+        // release 是 panic=abort, 一旦发生就是冷启动反复闪退。
+        .and_then(|v| v.as_object().cloned())
+        .map(Value::Object)
         .unwrap_or_else(|| json!({}))
 }
 
@@ -1576,110 +1586,6 @@ pub fn retry(app: AppHandle) {
         stop_backend(&app2);
         wait_for_backend_stop();
         startup(app2);
-    });
-}
-
-// ── 检查更新(DSH CLI 自身): npm registry 最新版 vs 当前 dsh --version ──────
-// DSH CLI 没有内置更新命令, 官方更新路径是 `npm install -g @deepseek-ai/dsh@latest`。
-
-/// 执行一行 cmd 命令并捕获输出与成功与否(窗口隐藏)。
-fn run_capture_line(cmdline: &str) -> Option<(String, bool)> {
-    let mut command = Command::new("cmd");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.raw_arg(format!("/S /C \"{cmdline}\""));
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(windows))]
-    {
-        command.arg("/C").arg(cmdline);
-    }
-    let out = command.output().ok()?;
-    let ok = out.status.success();
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Some((text, ok))
-}
-
-/// npm registry 上 @deepseek-ai/dsh 的最新版本号(官方源优先, 国内镜像兜底)。
-fn fetch_latest_version() -> Option<String> {
-    for base in ["https://registry.npmjs.org", "https://registry.npmmirror.com"] {
-        let url = format!("{base}/@deepseek-ai/dsh/latest");
-        let Ok(resp) = ureq::get(&url).timeout(Duration::from_secs(6)).call() else {
-            continue;
-        };
-        let Ok(v) = resp.into_json::<Value>() else { continue };
-        if let Some(l) = v.get("version").and_then(|x| x.as_str()) {
-            return Some(l.to_string());
-        }
-    }
-    None
-}
-
-/// 简单版本比较(主版本数值 + prerelease rc 号), Greater 表示 a 比 b 新。
-fn cmp_ver(a: &str, b: &str) -> std::cmp::Ordering {
-    let norm = |v: &str| -> (Vec<u32>, u32) {
-        let (base, pre) = match v.split_once('-') {
-            Some((b, p)) => (b, p),
-            None => (v, ""),
-        };
-        let nums: Vec<u32> = base.split('.').map(|x| x.parse().unwrap_or(0)).collect();
-        let pren = pre
-            .strip_prefix("rc")
-            .and_then(|n| n.trim().parse::<u32>().ok())
-            .unwrap_or(0);
-        (nums, pren)
-    };
-    let (an, ap) = norm(a);
-    let (bn, bp) = norm(b);
-    for i in 0..an.len().max(bn.len()) {
-        let x = an.get(i).copied().unwrap_or(0);
-        let y = bn.get(i).copied().unwrap_or(0);
-        if x != y {
-            return x.cmp(&y);
-        }
-    }
-    ap.cmp(&bp)
-}
-
-/// 托盘「检查更新(DSH)」: 查 npm 最新版, 有新版弹窗确认后用官方命令更新。
-/// 全程在后台线程执行(版本检查/弹窗/更新), 不阻塞托盘与事件线程, 不影响前台。
-pub fn check_update(app: AppHandle) {
-    std::thread::spawn(move || {
-        let current = run_capture_line("dsh --version")
-            .map(|(t, _)| t)
-            .unwrap_or_default();
-        let Some(latest) = fetch_latest_version() else {
-            crate::prompt_yes_no(&app, "检查更新", "无法获取最新版本(网络不可达或 registry 失败)。");
-            return;
-        };
-        if current.trim().is_empty() {
-            crate::prompt_yes_no(&app, "检查更新", "无法获取当前 dsh 版本(请确认 dsh 命令可用)。");
-            return;
-        }
-        if cmp_ver(&latest, &current) != std::cmp::Ordering::Greater {
-            crate::prompt_yes_no(&app, "检查更新", &format!("已是最新版本: {latest}"));
-            return;
-        }
-        let question = format!(
-            "发现新版本 {latest}(当前 {current})\n\n是否立即更新?\n(将执行: npm install -g @deepseek-ai/dsh@{latest})"
-        );
-        if !crate::prompt_yes_no(&app, "检查更新", &question) {
-            return;
-        }
-        // npm 装包可能耗时, 同样在后台线程执行, 完成后再弹窗提示。
-        let ok = run_capture_line(&format!("npm install -g @deepseek-ai/dsh@{latest}"))
-            .map(|(_, ok)| ok)
-            .unwrap_or(false);
-        if ok {
-            crate::prompt_yes_no(&app, "检查更新", "更新成功。请重启 DSH(dsh web)使新版本生效。");
-        } else {
-            crate::prompt_yes_no(
-                &app,
-                "检查更新",
-                &format!("更新失败。请手动执行:\nnpm install -g @deepseek-ai/dsh@{latest}"),
-            );
-        }
     });
 }
 

@@ -95,10 +95,12 @@ pub(crate) const MENU_SCRIPT: &str = r#"
 })();
 "#;
 
-/// GitHub 请求加速镜像注入: 插件常请求 github.com / raw.githubusercontent.com /
-/// api.github.com 等文件与仓库资源, 国内直连易失败。本脚本在每帧注入,
+/// GitHub 请求加速镜像注入: 插件常请求 github.com / raw.githubusercontent.com
+/// 等文件与仓库资源, 国内直连易失败。本脚本在每帧注入,
 /// 把 fetch / XMLHttpRequest 中的 GitHub URL 重写为 `https://gh-proxy.com/<原URL>`
 /// (GitHub 加速镜像前缀), 本地(3080/127.0.0.1)请求不受影响。
+/// api.github.com 刻意不镜像: API 响应(版本/校验数据)经不受信镜像会被整体
+/// 替换, 且调用方可能附带凭据头, 一律只走直连。
 pub(crate) const GH_MIRROR_SCRIPT: &str = r#"
 (() => {
   if (window.__dsh_gh_mirror) return;
@@ -107,7 +109,6 @@ pub(crate) const GH_MIRROR_SCRIPT: &str = r#"
   var PREFIXES = [
     'https://github.com/',
     'https://raw.githubusercontent.com/',
-    'https://api.github.com/',
     'https://gist.githubusercontent.com/',
     'https://codeload.github.com/',
     'https://objects.githubusercontent.com/'
