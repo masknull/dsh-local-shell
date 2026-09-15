@@ -30,7 +30,7 @@ DeepSeek Harness(DSH)的 Windows 桌面壳,基于 **Tauri v2 + React 18 + TypeSc
 
 ### 功能
 
-- **开箱即用**:双击 exe 自动启动 DSH(`dsh web`),就绪后窗口内嵌 `http://127.0.0.1:3080/` 的**原生 webchat 界面**(iframe 常驻壳,不自创聊天 UI、不做反向代理)
+- **开箱即用**:双击 exe 自动启动 DSH(`dsh web`),就绪后窗口**顶层导航**到 `http://127.0.0.1:3080/` 的**原生 webchat 界面**(第一方上下文,不自创聊天 UI、不做反向代理;顶层而非 iframe 是为了让 SameSite=Lax 的会话 cookie 正常存取,登录态才持久)
 - **系统标题栏**:保留 Windows 原生标题栏(最小化/最大化/关闭、贴靠、边缘缩放全部原生);壳自身不再自绘标题栏,启动页只占内容区
 - **深浅色跟随系统**:启动页与环境管理面板的颜色全部来自一套语义化 CSS 令牌,暗色为默认、亮色由 `prefers-color-scheme` 驱动 —— 跟随 Windows「应用模式」实时切换,改系统设置即刻重绘、无需重启;WebView2 默认 `PreferredColorScheme=Auto`,故无需任何 Rust 侧代码
 - **环境管理面板**:搜索栏(过滤字段名与值)+ 环境|日志 标签 + 四组信息卡(运行状态/DSH 内核/组件版本/位置与存储;主功能标题在卡片外,子功能共处一个大圆角卡)+ 底部 刷新检测/重启/更多;复制⧉、打开目录📁一键图标,聊天状态在面板期间保留(背后虚化)
@@ -105,12 +105,14 @@ pnpm tauri build    # 产物:src-tauri\target\release\dsh-desktop-windowos.exe
 ### 项目结构
 
 ```
-src/                 React 常驻壳:自绘顶栏 + boot 视图 + webchat iframe
+src/                 React 壳页:boot 视图(启动/未找到/失败) + 环境管理面板
+  App.tsx            boot 页:四状态(启动中/正在打开/未找到 DSH/启动失败)
   EnvPanel.tsx       环境管理面板(搜索/环境|日志标签/信息卡/日志控制台)
+  styles/            色彩与样式真源:theme(令牌,深浅色)/ base / boot / panel
 src-tauri/src/
   dsh.rs             DSH 生命周期:探测 / spawn / 监护自愈 / 会话日志(轮转+等级)
   monitor.rs         events.host WS 监听:running 边沿 + 两按钮通知 + 断线重连
-  update.rs          自更新(多路由下载+完整性校验) / 插件同步 / 完整重启
+  update.rs          前后端完整重启(自更新已移除)
   lib.rs             托盘、窗口 X=隐藏、single-instance、AUMID 注册、面板命令
 plugin/              DSH 插件(npm: dsh-desktop-plugin):自动安装/升级 exe + 双快捷方式 + desktop_launch 工具
 icon-src/            图标源(DeepSeek 鲸鱼标,品牌蓝 #4D6BFE)
@@ -128,7 +130,7 @@ Ships as a **single portable bare exe** (~4.5 MB, no installer).
 
 ### Features
 
-- **Zero-setup**: double-click the exe and it starts DSH (`dsh web`); once ready, the window embeds the **native webchat** at `http://127.0.0.1:3080/` in a persistent same-window iframe (no custom chat UI, no reverse proxy)
+- **Zero-setup**: double-click the exe and it starts DSH (`dsh web`); once ready the window **navigates top-level** to the **native webchat** at `http://127.0.0.1:3080/` (first-party context, no custom chat UI, no reverse proxy — top-level rather than an iframe so the `SameSite=Lax` session cookie is stored and sent, which is what makes the login persist)
 - **Native title bar**: the Windows title bar is kept (min/max/close, snap and edge-resize all native); the shell no longer draws its own
 - **Light/dark follows the OS**: every colour on the boot page and in the environment panel comes from one set of semantic CSS tokens — dark by default, light driven by `prefers-color-scheme` — so it tracks the Windows app mode live, repainting as soon as the system setting changes, with no Rust code involved (WebView2 defaults to `PreferredColorScheme=Auto`)
 - **Environment panel**: search bar (filters field names/values) + 环境|日志 tabs + four grouped fact cards (runtime / DSH kernel / component versions / storage) + bottom actions (re-detect / restart / more); copy & open-in-Explorer icon buttons; chat state survives panel visits (page behind is blurred)
