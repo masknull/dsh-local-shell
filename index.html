@@ -1,9 +1,31 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DeepSeek Harness</title>
+    <!--
+      First-paint background, inlined on purpose.
+
+      Tauri paints the window with the OS default colour before any stylesheet
+      is parsed, so a themed app flashes the wrong shade on every cold start
+      (and worse on the boot page, which is the first thing a stuck user sees).
+      These two rules are the dark/light counterparts of --c-bg in
+      styles/theme.css and must be kept in sync with it by hand — they cannot
+      reference the token, because that file has not loaded yet.
+    -->
+    <style>
+      html {
+        background: #0f1115;
+        color-scheme: dark;
+      }
+      @media (prefers-color-scheme: light) {
+        html {
+          background: #f5f6f8;
+          color-scheme: light;
+        }
+      }
+    </style>
   </head>
 
   <body>

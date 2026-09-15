@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.0.5 — 2026-09-15
+
+**启动页重构 + 深浅色跟随系统**(前端 UI 层重写;业务逻辑与 Rust 侧零改动):
+
+- **深浅色跟随系统**:新增 `src/styles/theme.css` 作为唯一色彩真源 —— 约 40 个语义令牌(表面/前景/描边/交互/强调/状态/日志等级/阴影),暗色为默认(逐值复刻原观感),`@media (prefers-color-scheme: light)` 提供亮色调色板。WebView2 的 `PreferredColorScheme` 默认为 `Auto`(跟随 OS)且本项目从不覆盖,因此**无需任何 Rust 改动**即可实时跟随 Windows 主题:在系统里改「应用模式」,启动页当场重绘,不必重启
+- **样式分层重构**:809 行单文件 `App.css` 拆为 `styles/{theme,base,boot,panel}.css`;所有硬编码色值改为 `var(--c-*)`。启动页与环境面板此前共用一份样式,只改一半会出现深浅色割裂,故一并令牌化
+- **启动页重写**:四个状态(启动中/正在打开/未找到 DSH/启动失败)统一为「品牌标 + 状态槽 + 标题 + 说明 + 动作区」;恢复入口(一键全局安装、镜像备选、npx、自定义路径、重试、退出)按主次两级动作重排;崩溃尾部改为可复制的等宽原文块
+- **消除首屏白闪**:Tauri 以 OS 默认色绘制窗口,样式表解析前会闪一下错误底色;`index.html` 内联首帧背景(暗/亮两值,与 `--c-bg` 手工同步并注明原因 —— 此时令牌尚未加载)
+- **清理死代码**:移除 `app-update` 事件监听与更新进度 UI(Rust 侧自更新已删,`update.rs` 仅剩 `restart_app`,该事件零 emit)、被 CSS `display:none` 强制隐藏的自绘 TitleBar、已无引用的 `.webchat`/`.update-ring` 样式
+- **新增校验工具**:`scripts/check-classes.mjs` 交叉核对 TSX 类名与样式表,报告「用了但无规则」与「有规则但未用」
+
+Boot-page rebuild + OS-following light/dark theme (frontend UI layer only; zero Rust changes):
+
+- Light/dark now follows the OS. `src/styles/theme.css` is the single source of colour truth: ~40 semantic tokens, dark as default (value-for-value the original look), a light palette behind `prefers-color-scheme: light`. WebView2's `PreferredColorScheme` defaults to `Auto` (follow the OS) and this project never overrides it, so the switch needs no Rust work and reacts live — change the Windows app mode and the boot page repaints without a restart
+- Styles split into `styles/{theme,base,boot,panel}.css`; every literal colour is now a token
+- Boot page rewritten: four states share one card structure; recovery actions ranked primary/secondary; crash tail shown as copyable monospace
+- No more first-paint flash: the frame background is inlined in `index.html`
+- Dead code removed: the `app-update` listener (no emitter exists), the CSS-hidden self-drawn title bar, unused `.webchat`/`.update-ring`
+
 ## v2.0.4 — 2026-09-10
 
 **审计整改 + 功能裁剪**(全量安全审计后按结论处置;**CI 版本号改为自动递增**):

@@ -1,0 +1,144 @@
+/* ==========================================================================
+ * theme.css — the shell's entire colour system.
+ *
+ * One semantic token set, two palettes. Dark is the default and reproduces
+ * the original shell's look exactly; the light palette takes over when the OS
+ * reports a light application theme.
+ *
+ * No Rust-side work is required for the switch: WebView2's
+ * `PreferredColorScheme` defaults to `Auto` (follows the OS), this project
+ * never overrides it, and the window is built without a forced `theme` — so
+ * `prefers-color-scheme` already tracks Windows. The media query below is the
+ * whole mechanism, and it reacts live: flipping 设置 → 个性化 → 颜色 while the
+ * boot page is on screen repaints it without a restart.
+ *
+ * Rule for every other stylesheet: reference var(--c-*), never a literal
+ * colour. A hardcoded hex is a bug that only shows up on one of the two themes.
+ * ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* --- Surfaces: deepest backdrop → most raised layer --- */
+  --c-bg: #0f1115;
+  --c-bg-raised: #171a21;
+  --c-surface: #151821;
+  --c-surface-2: #1b1f2a;
+  --c-console: #0d1017;
+  --c-input-bg: #0f1115;
+
+  /* --- Foreground --- */
+  --c-fg: #e6e6e6;
+  --c-fg-strong: #e7eaf0;
+  --c-fg-muted: #9aa0a6;
+  --c-fg-subtle: #5c6370;
+  --c-fg-label: #969dab;
+  --c-fg-on-accent: #ffffff;
+
+  /* --- Borders & separators --- */
+  --c-border: #2c3140;
+  --c-border-soft: rgba(255, 255, 255, 0.07);
+  --c-border-panel: rgba(255, 255, 255, 0.08);
+  --c-border-menu: rgba(255, 255, 255, 0.12);
+  --c-border-strong: rgba(255, 255, 255, 0.14);
+
+  /* --- Interaction & layering --- */
+  --c-hover: rgba(255, 255, 255, 0.05);
+  --c-hover-strong: rgba(255, 255, 255, 0.08);
+  --c-card-bg: rgba(255, 255, 255, 0.025);
+
+  /* --- Accent --- */
+  --c-accent: #1f6feb;
+  --c-accent-hover: #388bfd;
+  --c-accent-text: #4c9aff;
+  --c-accent-soft: rgba(76, 154, 255, 0.14);
+  --c-link: #58a6ff;
+  --c-focus: #4c9aff;
+  --c-close-hover: #e81123;
+
+  /* --- Status --- */
+  --c-ok: #43c98b;
+  --c-ok-glow: rgba(67, 201, 139, 0.53);
+  --c-warn: #f2a93b;
+  --c-warn-glow: rgba(242, 169, 59, 0.53);
+  --c-danger: #ff6b6b;
+  --c-danger-soft: #ef5b67;
+  --c-danger-soft-bg: rgba(239, 91, 103, 0.08);
+  --c-danger-soft-border: rgba(239, 91, 103, 0.27);
+
+  /* --- Log levels --- */
+  --c-log-banner: #58a6ff;
+  --c-log-info: #9aa0a6;
+  --c-log-warn: #d29922;
+  --c-log-error: #f85149;
+
+  /* --- Elevation --- */
+  --c-backdrop: rgba(0, 0, 0, 0.55);
+  --c-shadow-card: 0 8px 32px rgba(0, 0, 0, 0.35);
+  --c-shadow-dialog: 0 24px 80px rgba(0, 0, 0, 0.55);
+  --c-shadow-menu: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --c-shadow-toast: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* --------------------------------------------------------------------------
+ * Light palette — the OS application theme is light.
+ * Tuned for WCAG AA body contrast on every surface pair actually used here
+ * (fg on bg, fg-strong on card, accent-text on surface).
+ * -------------------------------------------------------------------------- */
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+
+    --c-bg: #f5f6f8;
+    --c-bg-raised: #ffffff;
+    --c-surface: #ffffff;
+    --c-surface-2: #ffffff;
+    --c-console: #f6f8fa;
+    --c-input-bg: #ffffff;
+
+    --c-fg: #1f2328;
+    --c-fg-strong: #1f2328;
+    --c-fg-muted: #59636e;
+    --c-fg-subtle: #8c959f;
+    --c-fg-label: #59636e;
+    --c-fg-on-accent: #ffffff;
+
+    --c-border: #d1d9e0;
+    --c-border-soft: rgba(31, 35, 40, 0.1);
+    --c-border-panel: rgba(31, 35, 40, 0.12);
+    --c-border-menu: rgba(31, 35, 40, 0.15);
+    --c-border-strong: rgba(31, 35, 40, 0.18);
+
+    --c-hover: rgba(31, 35, 40, 0.05);
+    --c-hover-strong: rgba(31, 35, 40, 0.09);
+    --c-card-bg: rgba(31, 35, 40, 0.02);
+
+    --c-accent: #0969da;
+    --c-accent-hover: #0860ca;
+    --c-accent-text: #0969da;
+    --c-accent-soft: rgba(9, 105, 218, 0.12);
+    --c-link: #0550ae;
+    --c-focus: #0969da;
+    --c-close-hover: #e81123;
+
+    --c-ok: #1a7f37;
+    --c-ok-glow: rgba(26, 127, 55, 0.4);
+    --c-warn: #9a6700;
+    --c-warn-glow: rgba(154, 103, 0, 0.4);
+    --c-danger: #cf222e;
+    --c-danger-soft: #cf222e;
+    --c-danger-soft-bg: rgba(207, 34, 46, 0.06);
+    --c-danger-soft-border: rgba(207, 34, 46, 0.25);
+
+    --c-log-banner: #0969da;
+    --c-log-info: #59636e;
+    --c-log-warn: #9a6700;
+    --c-log-error: #cf222e;
+
+    --c-backdrop: rgba(31, 35, 40, 0.45);
+    --c-shadow-card: 0 8px 32px rgba(31, 35, 40, 0.12);
+    --c-shadow-dialog: 0 24px 80px rgba(31, 35, 40, 0.22);
+    --c-shadow-menu: 0 12px 40px rgba(31, 35, 40, 0.18);
+    --c-shadow-toast: 0 8px 24px rgba(31, 35, 40, 0.16);
+  }
+}

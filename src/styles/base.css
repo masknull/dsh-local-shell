@@ -1,0 +1,161 @@
+/* ==========================================================================
+ * base.css — reset, page frame, shared primitives.
+ * Every colour comes from theme.css; nothing here is theme-specific.
+ * ========================================================================== */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  background: var(--c-bg);
+  color: var(--c-fg);
+  /* The shell is an app chrome, not a document: no rubber-band scrolling,
+     no accidental text selection while dragging the window. */
+  overflow: hidden;
+  user-select: none;
+}
+
+/* --- App frame: one full-height column, no chrome of its own ------------ */
+
+.shell {
+  position: relative;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--c-bg);
+  color: var(--c-fg);
+  overflow: hidden;
+}
+
+/* --- Buttons: one base, three intents ------------------------------------ */
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  /* Re-enable text selection inside the app's own controls is unnecessary,
+     but the global `user-select: none` above must not leak into values. */
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The app's primary call to action (boot-page recovery actions, panel 重启). */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 20px;
+  font-size: 14px;
+  line-height: 1.2;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--c-accent);
+  color: var(--c-fg-on-accent);
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--c-accent-hover);
+}
+
+.btn--secondary {
+  background: transparent;
+  border-color: var(--c-border);
+  color: var(--c-fg-muted);
+}
+
+.btn--secondary:hover:not(:disabled) {
+  background: var(--c-hover);
+  color: var(--c-fg);
+}
+
+/* Low-emphasis text link (boot-page "查看日志"). */
+.link-btn {
+  padding: 2px 6px;
+  font-size: 12px;
+  color: var(--c-fg-muted);
+  text-decoration: underline dotted;
+  border-radius: 4px;
+}
+
+.link-btn:hover {
+  color: var(--c-link);
+}
+
+/* --- Text input ---------------------------------------------------------- */
+
+.input {
+  width: 100%;
+  padding: 8px 12px;
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-input-bg);
+  color: var(--c-fg);
+}
+
+.input::placeholder {
+  color: var(--c-fg-subtle);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--c-accent);
+}
+
+/* --- Focus ring: visible for keyboard users on every theme ---------------- */
+
+:focus-visible {
+  outline: 2px solid var(--c-focus);
+  outline-offset: 1px;
+}
+
+/* --- Spinner ------------------------------------------------------------- */
+
+.spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--c-border);
+  border-top-color: var(--c-link);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --- Motion preference --------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -49,7 +49,7 @@ function formatBytes(bytes: number | null | undefined): string {
 /** Small self-dismissing toast ("已复制" style); never blocks anything. */
 function Toast({ message }: { message: string | null }) {
   if (!message) return null;
-  return <div className="ep-toast">{message}</div>;
+  return <div className="toast">{message}</div>;
 }
 
 /** 30px icon button (copy / open dir), weak by default, framed on hover. */
@@ -67,7 +67,7 @@ function IconButton({
   return (
     <button
       type="button"
-      className="ep-icon-btn"
+      className="icon-btn"
       title={label}
       aria-label={label}
       disabled={disabled}
@@ -113,10 +113,10 @@ function FieldRow({
   const shown = value === null || value === undefined || value === "" ? "未检测到" : value;
   const absent = shown === "未检测到";
   return (
-    <div className="ep-row">
-      <div className="ep-row-label">{label}</div>
-      <div className={`ep-row-value${mono ? " mono" : ""}${absent ? " absent" : ""}`}>{shown}</div>
-      <div className="ep-row-actions">
+    <div className="row">
+      <div className="row-label">{label}</div>
+      <div className={`row-value${mono ? " mono" : ""}${absent ? " absent" : ""}`}>{shown}</div>
+      <div className="row-actions">
         {!absent && (
           <IconButton label="复制" onClick={() => onCopy(shown)}>
             {CopyIcon}
@@ -142,9 +142,9 @@ function SectionCard({
   children: React.ReactNode;
 }) {
   return (
-    <section className="ep-group">
-      <div className="ep-group-title">{title}</div>
-      <div className="ep-card">{children}</div>
+    <section className="group">
+      <div className="group-title">{title}</div>
+      <div className="card">{children}</div>
     </section>
   );
 }
@@ -210,36 +210,36 @@ function LogViewer({ onCopy }: { onCopy: (text: string, note: string) => void })
   };
 
   return (
-    <div className="ep-log">
-      <div className="ep-log-toolbar">
+    <div className="log">
+      <div className="log-toolbar">
         {(["INFO", "WARN", "ERROR"] as const).map((level) => (
           <button
             key={level}
             type="button"
-            className={`ep-pill ep-pill-sm${levels[level] ? " active" : ""}`}
+            className={`pill pill--sm${levels[level] ? " active" : ""}`}
             aria-pressed={levels[level]}
             onClick={() => setLevels((s) => ({ ...s, [level]: !s[level] }))}
           >
             {level === "WARN" ? "WARNING" : level}
           </button>
         ))}
-        <span className="ep-log-spacer" />
-        <button type="button" className="ep-tool-btn" onClick={() => setPolling((p) => !p)}>
+        <span className="log-spacer" />
+        <button type="button" className="tool-btn" onClick={() => setPolling((p) => !p)}>
           {polling ? "暂停自动刷新" : "恢复自动刷新"}
         </button>
         <button
           type="button"
-          className="ep-tool-btn"
+          className="tool-btn"
           onClick={() => onCopy((lines ?? []).join("\n"), "已复制")}
         >
           复制全部
         </button>
-        <button type="button" className="ep-tool-btn" onClick={() => setCleared(true)}>
+        <button type="button" className="tool-btn" onClick={() => setCleared(true)}>
           清空显示
         </button>
         <button
           type="button"
-          className="ep-tool-btn"
+          className="tool-btn"
           onClick={() => {
             setFollow(true);
             const el = consoleRef.current;
@@ -251,7 +251,7 @@ function LogViewer({ onCopy }: { onCopy: (text: string, note: string) => void })
       </div>
       <pre
         ref={consoleRef}
-        className="ep-log-console"
+        className="log-console"
         onScroll={(event) => {
           const el = event.currentTarget;
           setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 40);
@@ -355,28 +355,28 @@ export default function EnvPanel({
   };
 
   const statusRow = running ? (
-    <span className="ep-status ok">
-      <span className="ep-dot ok" />
+    <span className="status ok">
+      <span className="dot ok" />
       运行正常
     </span>
   ) : (
-    <span className="ep-status warn">
-      <span className="ep-dot warn" />
+    <span className="status warn">
+      <span className="dot warn" />
       无应答
     </span>
   );
 
   return (
     <div
-      className="ep-backdrop"
+      className="panel-backdrop"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="ep-dialog" role="dialog" aria-modal="true" aria-label="环境管理">
+      <div className="panel" role="dialog" aria-modal="true" aria-label="环境管理">
         {/* 1. Search bar */}
-        <div className="ep-search">
-          <svg className="ep-search-icon" viewBox="0 0 16 16" aria-hidden="true">
+        <div className="panel-search">
+          <svg className="panel-search-icon" viewBox="0 0 16 16" aria-hidden="true">
             <circle cx="6.5" cy="6.5" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
             <path d="M10 10 14 14" stroke="currentColor" strokeWidth="1.4" />
           </svg>
@@ -387,13 +387,13 @@ export default function EnvPanel({
             onChange={(event) => setQuery(event.target.value)}
           />
           {query !== "" ? (
-            <button type="button" className="ep-icon-btn" title="清空搜索" aria-label="清空搜索" onClick={() => setQuery("")}>
+            <button type="button" className="icon-btn" title="清空搜索" aria-label="清空搜索" onClick={() => setQuery("")}>
               <svg viewBox="0 0 10 10" aria-hidden="true">
                 <path d="M0.8 0.8 9.2 9.2 M9.2 0.8 0.8 9.2" stroke="currentColor" strokeWidth="1.2" fill="none" />
               </svg>
             </button>
           ) : (
-            <button type="button" className="ep-icon-btn" title="关闭" aria-label="关闭" onClick={onClose}>
+            <button type="button" className="icon-btn" title="关闭" aria-label="关闭" onClick={onClose}>
               <svg viewBox="0 0 10 10" aria-hidden="true">
                 <path d="M0.8 0.8 9.2 9.2 M9.2 0.8 0.8 9.2" stroke="currentColor" strokeWidth="1.2" fill="none" />
               </svg>
@@ -402,14 +402,14 @@ export default function EnvPanel({
         </div>
 
         {/* Body: tabs + full-width content (single column) */}
-        <div className="ep-body">
-          <div className="ep-detail">
-            <nav className="ep-nav">
+        <div className="panel-body">
+          <div className="panel-detail">
+            <nav className="panel-nav">
               {TABS.map((t) => (
                 <button
                   key={t.id}
                   type="button"
-                  className={`ep-tab${tab === t.id ? " active" : ""}`}
+                  className={`panel-tab${tab === t.id ? " active" : ""}`}
                   aria-current={tab === t.id ? "page" : undefined}
                   onClick={() => setTab(t.id)}
                 >
@@ -418,19 +418,19 @@ export default function EnvPanel({
               ))}
             </nav>
 
-            <div className="ep-content">
+            <div className="panel-content">
               {tab === "env" ? (
                 info === null && error === "" ? (
-                  <div className="ep-loading">
+                  <div className="panel-loading">
                     <div className="spinner" aria-hidden="true" />
                     正在采集环境信息…
                   </div>
                 ) : (
-                  <div className="ep-content-inner">
+                  <div className="panel-content-inner">
                     {error !== "" && (
-                      <div className="ep-error">
+                      <div className="panel-error">
                         检测失败:{error}
-                        <button type="button" className="ep-tool-btn" onClick={onRefresh}>
+                        <button type="button" className="tool-btn" onClick={onRefresh}>
                           重新检测
                         </button>
                       </div>
@@ -439,10 +439,10 @@ export default function EnvPanel({
                       <>
                         <SectionCard title="运行状态">
                           {matches("应用状态", running ? "运行正常" : "无应答") && (
-                            <div className="ep-row">
-                              <div className="ep-row-label">应用状态</div>
-                              <div className="ep-row-value">{statusRow}</div>
-                              <div className="ep-row-actions" />
+                            <div className="row">
+                              <div className="row-label">应用状态</div>
+                              <div className="row-value">{statusRow}</div>
+                              <div className="row-actions" />
                             </div>
                           )}
                           {matches("占用进程 PID", owner?.pid !== undefined ? String(owner.pid) : null) && (
@@ -532,19 +532,19 @@ export default function EnvPanel({
         </div>
 
         {/* 4. Bottom action bar (right-aligned actions only) */}
-        <div className="ep-bottom">
-          <button type="button" className="ep-secondary" disabled={refreshing} onClick={onRefresh}>
+        <div className="panel-bottom">
+          <button type="button" className="panel-secondary" disabled={refreshing} onClick={onRefresh}>
             {refreshing ? "检测中…" : "刷新检测"}
           </button>
-          <button type="button" className="ep-primary" onClick={restart}>
+          <button type="button" className="panel-primary" onClick={restart}>
             重启
           </button>
-          <div className="ep-more" ref={moreRef}>
-            <button type="button" className="ep-secondary" onClick={() => setMoreOpen((o) => !o)}>
+          <div className="panel-more" ref={moreRef}>
+            <button type="button" className="panel-secondary" onClick={() => setMoreOpen((o) => !o)}>
               更多 ⌃
             </button>
               {moreOpen && (
-                <div className="ep-menu" role="menu">
+                <div className="panel-menu" role="menu">
                   <button
                     type="button"
                     role="menuitem"

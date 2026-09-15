@@ -1,0 +1,506 @@
+/* ==========================================================================
+ * panel.css — the environment-manager dialog (环境管理面板).
+ *
+ * Structure is unchanged from the original: search bar / 环境|日志 tabs /
+ * grouped fact cards / bottom action bar / log console. Only the colour source
+ * changed — every literal is now a theme token, so the panel flips with the
+ * boot page instead of staying dark on a light desktop.
+ * ========================================================================== */
+
+.panel-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  background: var(--c-backdrop);
+  backdrop-filter: blur(4px);
+}
+
+.panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(1440px, 100%);
+  height: 100%;
+  max-height: 1080px;
+  min-width: 0;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border-panel);
+  border-radius: 14px;
+  box-shadow: var(--c-shadow-dialog);
+  overflow: hidden;
+}
+
+/* --- 1. Search bar ------------------------------------------------------- */
+
+.panel-search {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 64px;
+  flex: none;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--c-border-soft);
+}
+
+.panel-search-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--c-fg-label);
+  flex: none;
+}
+
+.panel-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--c-fg-strong);
+  font: inherit;
+  font-size: 18px;
+}
+
+.panel-search input::placeholder {
+  color: var(--c-fg-subtle);
+}
+
+.panel-search input:focus {
+  outline: none;
+}
+
+/* --- 2. Body: tabs + full-width single-column content -------------------- */
+
+.panel-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel-detail {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel-nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 56px;
+  flex: none;
+  padding: 0 32px;
+  border-bottom: 1px solid var(--c-border-soft);
+}
+
+.panel-tab {
+  height: 56px;
+  padding: 0 16px;
+  font-size: 14px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--c-fg-label);
+}
+
+.panel-tab:hover:not(.active) {
+  background: var(--c-hover);
+  color: var(--c-fg-strong);
+}
+
+.panel-tab.active {
+  color: var(--c-accent-text);
+  border-bottom-color: var(--c-accent-text);
+}
+
+.panel-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 32px;
+  width: 100%;
+}
+
+/* Cards use the full width, capped on ultra-wide windows. */
+.panel-content-inner {
+  max-width: 1400px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* --- Pills & tool buttons ------------------------------------------------ */
+
+.pill {
+  height: 32px;
+  padding: 0 16px;
+  font-size: 13px;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid var(--c-border-strong);
+  color: var(--c-fg-label);
+}
+
+.pill:hover {
+  background: var(--c-hover);
+  color: var(--c-fg-strong);
+}
+
+.pill.active {
+  border-color: var(--c-focus);
+  background: var(--c-accent-soft);
+  color: var(--c-accent-text);
+}
+
+.pill--sm {
+  height: 26px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.pill--sm.active {
+  color: var(--c-accent-text);
+}
+
+.tool-btn {
+  height: 32px;
+  padding: 0 14px;
+  font-size: 13px;
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid var(--c-border-menu);
+  color: var(--c-fg-label);
+}
+
+.tool-btn:hover:not(:disabled) {
+  background: var(--c-hover);
+  color: var(--c-fg-strong);
+}
+
+/* --- Status dots --------------------------------------------------------- */
+
+.dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.dot.ok {
+  background: var(--c-ok);
+  box-shadow: 0 0 6px var(--c-ok-glow);
+}
+
+.dot.warn {
+  background: var(--c-warn);
+  box-shadow: 0 0 6px var(--c-warn-glow);
+}
+
+/* --- Fact cards: title OUTSIDE above one big card per group -------------- */
+
+.group {
+  margin-bottom: 30px;
+}
+
+.group-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--c-fg-label);
+  letter-spacing: 0.4px;
+  margin-bottom: 12px;
+}
+
+.card {
+  width: 100%;
+  background: var(--c-card-bg);
+  border: 1px solid var(--c-border-panel);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 16px;
+  min-height: 58px;
+  padding: 10px 20px;
+}
+
+.row + .row {
+  border-top: 1px solid var(--c-border-soft);
+}
+
+.row-label {
+  font-size: 13px;
+  color: var(--c-fg-label);
+}
+
+.row-value {
+  font-size: 14px;
+  color: var(--c-fg-strong);
+  overflow-wrap: anywhere;
+  text-align: right;
+  user-select: text;
+}
+
+.row-value.mono {
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 13px;
+}
+
+.row-value.absent {
+  color: var(--c-fg-subtle);
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--c-fg-label);
+}
+
+.icon-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.icon-btn:hover:not(:disabled) {
+  border-color: var(--c-border-strong);
+  background: var(--c-hover);
+  color: var(--c-fg-strong);
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.status.ok {
+  color: var(--c-ok);
+}
+
+.status.warn {
+  color: var(--c-warn);
+}
+
+.panel-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 48px 0;
+  color: var(--c-fg-label);
+  font-size: 14px;
+}
+
+.panel-error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 12px 16px;
+  border: 1px solid var(--c-danger-soft-border);
+  border-radius: 10px;
+  background: var(--c-danger-soft-bg);
+  color: var(--c-danger-soft);
+  font-size: 13px;
+}
+
+/* --- Log tab ------------------------------------------------------------- */
+
+.log {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding-bottom: 12px;
+}
+
+.log-spacer {
+  flex: 1;
+}
+
+.log-console {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--c-console);
+  border: 1px solid var(--c-border-panel);
+  border-radius: 8px;
+  color: var(--c-fg-muted);
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-y: auto;
+  user-select: text;
+}
+
+/* Level colours on the shell's timestamped rows + session banners. */
+.log-banner {
+  color: var(--c-log-banner);
+}
+
+.log-info {
+  color: var(--c-log-info);
+}
+
+.log-warn {
+  color: var(--c-log-warn);
+}
+
+.log-error {
+  color: var(--c-log-error);
+}
+
+/* --- 4. Bottom action bar ------------------------------------------------ */
+
+.panel-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  height: 72px;
+  flex: none;
+  padding: 0 32px;
+  border-top: 1px solid var(--c-border-soft);
+}
+
+.panel-secondary {
+  height: 36px;
+  padding: 0 18px;
+  font-size: 13px;
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid var(--c-border-strong);
+  color: var(--c-fg);
+}
+
+.panel-secondary:hover:not(:disabled) {
+  background: var(--c-hover);
+}
+
+.panel-primary {
+  height: 36px;
+  padding: 0 22px;
+  font-size: 13px;
+  border-radius: 8px;
+  background: var(--c-accent-text);
+  border: 1px solid var(--c-accent-text);
+  color: var(--c-fg-on-accent);
+}
+
+.panel-primary:hover {
+  background: var(--c-accent-hover);
+  border-color: var(--c-accent-hover);
+}
+
+.panel-more {
+  position: relative;
+}
+
+.panel-menu {
+  position: absolute;
+  right: 0;
+  bottom: 44px;
+  min-width: 200px;
+  padding: 6px;
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border-menu);
+  border-radius: 10px;
+  box-shadow: var(--c-shadow-menu);
+  z-index: 5;
+}
+
+.panel-menu button {
+  display: block;
+  width: 100%;
+  padding: 9px 12px;
+  font-size: 13px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--c-fg);
+}
+
+.panel-menu button:hover {
+  background: var(--c-accent-soft);
+  color: var(--c-fg-strong);
+}
+
+/* --- Toast --------------------------------------------------------------- */
+
+.toast {
+  position: absolute;
+  right: 20px;
+  bottom: 84px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-border-menu);
+  box-shadow: var(--c-shadow-toast);
+  color: var(--c-fg-strong);
+  font-size: 13px;
+  z-index: 6;
+  pointer-events: none;
+}
+
+/* --- Responsive ---------------------------------------------------------- */
+
+@media (max-width: 899px) {
+  .panel-backdrop {
+    padding: 16px;
+  }
+
+  .row {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 6px;
+  }
+
+  .row-label {
+    order: 1;
+  }
+
+  .row-value {
+    order: 2;
+    text-align: left;
+  }
+
+  .row-actions {
+    order: 3;
+  }
+}

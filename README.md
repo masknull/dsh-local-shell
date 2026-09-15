@@ -31,7 +31,8 @@ DeepSeek Harness(DSH)的 Windows 桌面壳,基于 **Tauri v2 + React 18 + TypeSc
 ### 功能
 
 - **开箱即用**:双击 exe 自动启动 DSH(`dsh web`),就绪后窗口内嵌 `http://127.0.0.1:3080/` 的**原生 webchat 界面**(iframe 常驻壳,不自创聊天 UI、不做反向代理)
-- **自绘标题栏**:无边框窗口,鲸鱼标 + 「DeepSeek Harness」居中——**点名字打开环境管理面板**;拖拽区/最小化/最大化/关闭自绘,Win 贴靠与边缘缩放原生保留
+- **系统标题栏**:保留 Windows 原生标题栏(最小化/最大化/关闭、贴靠、边缘缩放全部原生);壳自身不再自绘标题栏,启动页只占内容区
+- **深浅色跟随系统**:启动页与环境管理面板的颜色全部来自一套语义化 CSS 令牌,暗色为默认、亮色由 `prefers-color-scheme` 驱动 —— 跟随 Windows「应用模式」实时切换,改系统设置即刻重绘、无需重启;WebView2 默认 `PreferredColorScheme=Auto`,故无需任何 Rust 侧代码
 - **环境管理面板**:搜索栏(过滤字段名与值)+ 环境|日志 标签 + 四组信息卡(运行状态/DSH 内核/组件版本/位置与存储;主功能标题在卡片外,子功能共处一个大圆角卡)+ 底部 刷新检测/重启/更多;复制⧉、打开目录📁一键图标,聊天状态在面板期间保留(背后虚化)
 - **日志体系(ComfyUI 式)**:dsh.log 只记壳自身事件(启动/监护/更新;DSH web 输出不入日志,不再膨胀),`[本地时间] [INFO/WARN/ERROR]` 格式逐行着色,每次启动轮转历史文件;启动页「查看日志」实时看终端在跑什么;日志页带等级筛选/自动跟随/清空显示
 - **诊断包**:面板「更多 → 导出诊断信息」一键把环境配置+本次日志组装成 markdown——复制到剪贴板可直接粘贴给 AI 排障,无需翻目录查全局安装
@@ -128,7 +129,8 @@ Ships as a **single portable bare exe** (~4.5 MB, no installer).
 ### Features
 
 - **Zero-setup**: double-click the exe and it starts DSH (`dsh web`); once ready, the window embeds the **native webchat** at `http://127.0.0.1:3080/` in a persistent same-window iframe (no custom chat UI, no reverse proxy)
-- **Custom title bar**: undecorated window with the whale mark + "DeepSeek Harness" centered — **click the name to open the environment panel**; drag/min/max/close are self-drawn, native snap and edge-resize intact
+- **Native title bar**: the Windows title bar is kept (min/max/close, snap and edge-resize all native); the shell no longer draws its own
+- **Light/dark follows the OS**: every colour on the boot page and in the environment panel comes from one set of semantic CSS tokens — dark by default, light driven by `prefers-color-scheme` — so it tracks the Windows app mode live, repainting as soon as the system setting changes, with no Rust code involved (WebView2 defaults to `PreferredColorScheme=Auto`)
 - **Environment panel**: search bar (filters field names/values) + 环境|日志 tabs + four grouped fact cards (runtime / DSH kernel / component versions / storage) + bottom actions (re-detect / restart / more); copy & open-in-Explorer icon buttons; chat state survives panel visits (page behind is blurred)
 - **ComfyUI-style logging**: dsh.log records only shell events (startup/supervision/updates; DSH's own output is not logged), timestamped `[INFO/WARN/ERROR]` rows with level coloring, rotated per session; a 查看日志 link on the boot page streams what the terminal is doing
 - **Diagnostic bundle**: 更多 → 导出诊断信息 packs env facts + the session log into markdown on your clipboard — paste it to any AI instead of hunting through the install

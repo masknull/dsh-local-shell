@@ -1,0 +1,168 @@
+/* ==========================================================================
+ * boot.css — the boot page (启动页).
+ *
+ * This is the only screen the shell owns: it is what the user sees while DSH
+ * starts, and it is the entire recovery surface when DSH cannot be found or
+ * crashes. Once DSH is ready Rust navigates the window away to the webchat, so
+ * everything here must be legible in both OS themes and must never be the
+ * reason a user is stuck.
+ *
+ * Layout: a centred card that grows with its content. States differ only by
+ * the icon slot, the title tone, and which actions render.
+ * ========================================================================== */
+
+.boot {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  overflow-y: auto;
+  background: var(--c-bg);
+}
+
+.boot-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: min(440px, 100%);
+  padding: 36px 32px 28px;
+  border: 1px solid var(--c-border-panel);
+  border-radius: 14px;
+  background: var(--c-bg-raised);
+  box-shadow: var(--c-shadow-card);
+  text-align: center;
+}
+
+/* --- Brand + status ------------------------------------------------------ */
+
+.boot-mark {
+  width: 44px;
+  height: 44px;
+  margin-bottom: 18px;
+  user-select: none;
+  /* The whale mark is brand-blue artwork; it reads on both themes as-is. */
+}
+
+.boot-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  margin-bottom: 12px;
+}
+
+.boot-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--c-fg);
+  line-height: 1.4;
+}
+
+.boot-title--danger {
+  color: var(--c-danger);
+}
+
+.boot-title--warn {
+  color: var(--c-warn);
+}
+
+.boot-desc {
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--c-fg-muted);
+  overflow-wrap: anywhere;
+  /* Machine output (a crash tail, a path) is worth copying. */
+  user-select: text;
+}
+
+/* Monospace block for raw error output / crash tails. */
+.boot-detail-block {
+  width: 100%;
+  max-height: 168px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--c-border-soft);
+  border-radius: 8px;
+  background: var(--c-console);
+  color: var(--c-log-error);
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow: auto;
+  user-select: text;
+}
+
+/* --- Actions ------------------------------------------------------------- */
+
+.boot-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  margin-top: 24px;
+}
+
+.boot-actions .btn {
+  width: 100%;
+}
+
+/* Inline pair for the two npm registries (primary + alternative). */
+.boot-actions--row {
+  flex-direction: row;
+  gap: 8px;
+}
+
+.boot-actions--row .btn {
+  flex: 1;
+  min-width: 0;
+  padding-inline: 12px;
+  font-size: 13px;
+}
+
+.boot-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+/* --- Footnote ------------------------------------------------------------ */
+
+.boot-hint {
+  margin-top: 20px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--c-fg-subtle);
+  overflow-wrap: anywhere;
+}
+
+.boot-hint code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--c-hover);
+  color: var(--c-fg-muted);
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 11.5px;
+}
+
+.boot-log-link {
+  margin-top: 14px;
+}
+
+/* --- Responsive ---------------------------------------------------------- */
+
+@media (max-width: 520px) {
+  .boot {
+    padding: 16px;
+  }
+
+  .boot-card {
+    padding: 28px 20px 22px;
+  }
+}
