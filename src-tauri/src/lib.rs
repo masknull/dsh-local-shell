@@ -2,6 +2,7 @@
 //! task-completion event monitor.
 
 mod dsh;
+mod memtok;
 mod menu;
 mod monitor;
 mod update;

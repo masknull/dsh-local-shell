@@ -568,15 +568,28 @@ pub(crate) fn check_auth_wall_now(app: &AppHandle) {
                 }
                 log_write(
                     LogLevel::Warn,
-                    "[auth-wall] 10秒内token仍未出现, 回退到接管弹窗(重启后重试捕获)",
+                    "[auth-wall] 10秒内token仍未在控制台尾出现, 改从运行中实例的内存恢复",
                 );
+            }
+            // 内存恢复: attach 实例(复用场景)没有可读的子进程控制台尾, 这是它
+            // 唯一的令牌来源; 自启实例则是控制台尾也没抓到时的兜底。DSH 的
+            // launch token 只存在于运行进程的内存里 —— 打印过的那一行早已被
+            // GC 回收, 磁盘上任何东西都重建不出来。
+            if recover_token_from_memory(&app) {
+                // 重新放行后续 401: 令牌导航若仍未生效(前端登录插件在 HTTP 层
+                // 拦截 token URL 是已知情况), 第二次扫描会拿到同一个令牌并直接
+                // 放弃, 由 MAX_SCANS 与 LAST_TOKEN 双重封顶, 不会变成扫描环。
+                AUTH_WALL_HANDLED.store(false, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+            if owned {
                 AUTH_WALL_HANDLED.store(false, std::sync::atomic::Ordering::Relaxed);
             }
             let take_over = crate::prompt_yes_no(
                 &app,
                 "DSH 需要浏览器认证",
                 concat!(
-                    "检测到 DSH 需要浏览器令牌(新版本认证),但当前实例不是本应用启动的,无法获取令牌。\n\n",
+                    "检测到 DSH 需要浏览器令牌(新版本认证),已尝试从运行中的实例内存提取令牌但未取得。\n\n",
                     "「是」重启 dsh web 宿主(由本应用接管,自动完成认证)\n",
                     "「否」退出本应用(保留当前 DSH 实例)",
                 ),
@@ -598,6 +611,84 @@ pub(crate) fn check_auth_wall_now(app: &AppHandle) {
             }
         }
     });
+}
+
+/// Recover a launch token from the memory of the process listening on the DSH
+/// port and, when one verifies over HTTP, navigate the main window to the
+/// tokenized URL. Returns true only when the window was navigated with a token
+/// that really exchanged for a browser session — shape alone never navigates.
+///
+/// This is the attach path's only token source: an instance we did not spawn
+/// has no console tail of ours to read, which is why reusing a running `dsh web`
+/// used to end at the takeover prompt. Bounded to `MAX_SCANS` scans per run,
+/// and the same token is never navigated twice: a token that answers 303 over
+/// HTTP but still leaves the webview unauthenticated means something sits in
+/// front of the token URL (the dsh-remote login plugin is the known case), and
+/// the caller must fall back to the prompt instead of scanning in a loop.
+fn recover_token_from_memory(app: &AppHandle) -> bool {
+    /// Scans allowed per app run: one to use the token, one to learn that using
+    /// the same token again changes nothing.
+    const MAX_SCANS: u32 = 2;
+    static SCANS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    static LAST_TOKEN: Mutex<Option<String>> = Mutex::new(None);
+
+    if SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= MAX_SCANS {
+        log_write(
+            LogLevel::Warn,
+            "[auth-wall] 内存恢复已用尽本次运行的重试次数, 回退接管弹窗",
+        );
+        return false;
+    }
+    let Some(pid) = port_listener_pid() else {
+        log_write(
+            LogLevel::Warn,
+            &format!("[auth-wall] 内存恢复跳过: 没有进程监听 127.0.0.1:{DSH_PORT}"),
+        );
+        return false;
+    };
+    let started = Instant::now();
+    let token = match crate::memtok::recover(pid, DSH_PORT) {
+        crate::memtok::Outcome::Found { token, stats } => {
+            log_write(
+                LogLevel::Info,
+                &format!(
+                    "[auth-wall] 内存恢复命中令牌(pid {pid}, {:.1}s): {stats}",
+                    started.elapsed().as_secs_f64()
+                ),
+            );
+            token
+        }
+        crate::memtok::Outcome::NotFound { detail } => {
+            log_write(
+                LogLevel::Warn,
+                &format!(
+                    "[auth-wall] 内存恢复未取得令牌(pid {pid}, {:.1}s): {detail}",
+                    started.elapsed().as_secs_f64()
+                ),
+            );
+            return false;
+        }
+    };
+    {
+        let Ok(mut last) = LAST_TOKEN.lock() else {
+            return false;
+        };
+        if last.as_deref() == Some(token.as_str()) {
+            log_write(
+                LogLevel::Warn,
+                "[auth-wall] 内存恢复拿到与上次相同的令牌而导航未生效, 回退接管弹窗",
+            );
+            return false;
+        }
+        *last = Some(token.clone());
+    }
+    // 令牌明文绝不写进日志: 不落盘正是这套认证的设计前提。
+    log_write(
+        LogLevel::Info,
+        &format!("[auth-wall] 用内存恢复的令牌重新导航(pid {pid})"),
+    );
+    navigate_main(app, &format!("{DSH_BASE}/?token={token}"));
+    true
 }
 
 /// Outcome of one candidate attempt.

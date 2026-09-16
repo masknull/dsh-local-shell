@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.0.6 — 2026-09-16
+
+**复用(attach)实例不再卡在「是否重启接管」:从运行中的进程内存里取回 launch token**:
+
+- **新增 `src-tauri/src/memtok.rs`**(纯 `kernel32` 裸 FFI,不加依赖):DSH 的 launch token 只存在于运行进程的内存里(打印过的那一行早被 GC 回收),attach 实例又没有本应用自己的子进程控制台尾可读——此前唯一出路是弹窗让用户重启接管。现在直接读监听 3080 那个进程的内存:枚举可读内存区 → 收集 43 字符 base64url 的**极大串**(附加尾字符约束 `AEIMQUYcgkosw048`——43 字符编码 32 字节时末位只承载 4 bit,这是长度带来的数学必然,不是对内容的猜测)→ 逐个候选走 HTTP 交换,**只有回 303 且签发 `dsh-auth-*` cookie 的才算数**(形状永不作为证据)
+- **三遍递进**:先跳过 MEM_IMAGE(映射的 DLL 代码不可能存 JS 字符串,少读约 160MB)→ 再全量内存 → 最后去掉尾字符约束兜底(防上游改编码)
+- **速度**:4MB 分块 `ReadProcessMemory` + 多线程 `min(CPU,8)` 从原子队列领区间 + 攒够 16 个候选即探测、命中即刻停扫(early stop);探测是手写的最小 HTTP/1.1 over TCP,显式带 `Host` 头(缺它必然 401——cookie 名与签名 audience 都由请求 authority 派生),只读响应头
+- **回退**:无监听进程 / `OpenProcess` 失败(跨用户或已退出)/ 无候选 / 候选全不通过 → 落到原来的「是(壳接管重启并自动认证)/ 否(退出保留外部实例)」弹窗,文案改为说明已尝试内存提取;每次运行最多扫 2 次,同一令牌不重复导航(前端登录插件在 HTTP 层拦 token URL 时不会变成扫描环)
+- **不落盘**:全程只读(`ReadProcessMemory`),令牌明文绝不写日志——不落盘正是这套认证的设计前提;日志只记扫描统计(区域数/跳过映像/读取量/候选数/探测数/耗时/是否早停)
+- **CI**:`build-shell.yml` 增加 `pull_request` 触发,PR 只构建并上传 exe 以校验可编译,不递增版本、不发布 Release
+
+Attach-mode token recovery from the running process's memory (no more "restart and take over?" on reuse):
+
+- New `src-tauri/src/memtok.rs` (raw `kernel32` FFI, no new dependency): the launch token lives only in the running process, and an attached instance has no console tail of ours to read — so reusing a running `dsh web` used to end at the takeover prompt. The shell now reads the listener's memory: enumerate readable regions → harvest every maximal 43-character base64url run (plus the tail-character constraint `AEIMQUYcgkosw048`, a mathematical consequence of encoding exactly 32 bytes) → exchange each candidate over HTTP and accept only one that answers `303` while minting the `dsh-auth-*` cookie. Shape is never accepted as proof
+- Three passes: skip MEM_IMAGE first (mapped executables cannot hold a JS string, ~160MB less to read), then all memory, then all memory without the tail filter
+- Fast: 4MB `ReadProcessMemory` chunks, `min(CPU,8)` workers pulling ranges off an atomic queue, and a probe round every 16 candidates so a hit stops the scan immediately; probes are a hand-written minimal HTTP/1.1 exchange with an explicit `Host` header (without it the server always answers 401 — the cookie name and its signed audience both derive from the request authority)
+- Fallback: no listener, `OpenProcess` denied, no candidate, or nothing verifying → the original 「是」take over / 「否」quit prompt, reworded to say memory recovery was tried. At most two scans per run and the same token is never navigated twice, so a front-auth plugin intercepting the token URL cannot turn into a scan loop
+- Read-only and disk-free: `ReadProcessMemory` only; the token never reaches the log, because not landing on disk is the whole point of this auth
+- CI: `build-shell.yml` also runs on pull requests to prove the change compiles; a PR bumps no version and publishes no release
+
 ## v2.0.5 — 2026-09-15
 
 **启动页重构 + 深浅色跟随系统**(前端 UI 层重写;业务逻辑与 Rust 侧零改动):

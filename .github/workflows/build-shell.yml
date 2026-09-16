@@ -4,10 +4,24 @@ name: build dsh-local-shell (shell)
 # 触发: 壳/前端/构建配置变更(push main)。版本号自动递增: 以最新 Release
 # tag 为基准 patch +1, 构建时写入 tauri.conf.json(不回写仓库),
 # 旧 Release 永不被覆盖。
+# PR 也会跑本工作流, 但只构建并上传产物以校验可编译 —— 版本递增与发布
+# 都限定在 main 上进行(见各步骤的 if 条件)。
 
 on:
   workflow_dispatch:
   push:
+    branches: [main, master]
+    paths:
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.npmrc'
+      - '.github/workflows/build-shell.yml'
+  # Pull requests build and upload the exe to prove the change compiles, but
+  # never touch the version or publish a release (see the `if:` guards below).
+  pull_request:
     branches: [main, master]
     paths:
       - 'src/**'
@@ -42,6 +56,7 @@ jobs:
         run: pnpm install --no-frozen-lockfile --config.dangerously-allow-all-builds=true
 
       - name: bump version (latest release tag + 0.0.1, in-memory only)
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -80,6 +95,7 @@ jobs:
           if-no-files-found: error
 
       - name: publish shell exe to a NEW patch release (older tags are never touched)
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
