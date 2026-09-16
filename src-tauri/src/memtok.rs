@@ -10,9 +10,10 @@
 //!
 //!   1. enumerate the committed, readable regions of the process listening on
 //!      the port;
-//!   2. harvest every maximal base64url run of exactly the token length, with
-//!      the 32-byte tail signature that `encodeBase64Url(randomBytes(32))` makes
-//!      a mathematical certainty;
+//!   2. harvest candidates — first the 43 characters behind the printed URL's
+//!      `token=` anchor, then every maximal base64url run of exactly the token
+//!      length, filtered by the 32-byte tail signature that
+//!      `encodeBase64Url(randomBytes(32))` makes a mathematical certainty;
 //!   3. exchange each candidate over HTTP and accept only the one that answers
 //!      303 while minting the `dsh-auth-*` browser session cookie.
 //!
@@ -80,9 +81,20 @@ mod imp {
     /// token found early stops the scan early.
     const BATCH_SIZE: usize = 16;
     const MAX_WORKERS: usize = 8;
+    /// Candidates probed at once inside one batch. A whole-memory pass yields
+    /// hundreds of candidates and the real token is often near the end of them,
+    /// so probing one at a time would make the HTTP round-trips the dominant
+    /// cost of the whole recovery.
+    const PROBE_LANES: usize = 8;
     /// Per-candidate probe timeout. A live `dsh web` answers a loopback GET in
     /// single-digit milliseconds, so anything slower is a dead or wedged server.
     const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+    /// The `token=` of the printed launch URL. Passing it as the anchor narrows
+    /// a pass to the one place the token is known to appear verbatim; measured
+    /// on a live instance the anchored pass sees single-digit candidates where
+    /// the unanchored pass sees hundreds.
+    const TOKEN_ANCHOR: &[u8] = b"token=";
 
     /// Characters a 43-character base64url encoding of exactly 32 bytes can end
     /// with. The final character carries only the last 4 input bits, so its
@@ -238,7 +250,7 @@ mod imp {
     /// truncated. `tail_filter` additionally requires the final character to be
     /// reachable by a 32-byte payload; the last pass drops it to stay correct if
     /// the upstream token encoding ever changes.
-    fn collect(buffer: &[u8], tail_filter: bool, out: &mut Vec<String>) {
+    fn collect_runs(buffer: &[u8], tail_filter: bool, out: &mut Vec<String>) {
         let length = buffer.len();
         for i in 0..length {
             if !BASE64URL[buffer[i] as usize] {
@@ -252,27 +264,60 @@ mod imp {
             if end > length {
                 break;
             }
-            let mut shaped = true;
-            for k in 1..TOKEN_LEN {
-                if !BASE64URL[buffer[i + k] as usize] {
-                    shaped = false;
-                    break;
-                }
-            }
-            if !shaped {
+            if !shaped(buffer, i, end) {
                 continue;
             }
             if end < length && BASE64URL[buffer[end] as usize] {
                 continue;
             }
-            if tail_filter && !TAIL[buffer[end - 1] as usize] {
+            accepted(buffer, i, end, tail_filter, out);
+        }
+    }
+
+    /// Append every token that starts immediately after `marker`.
+    ///
+    /// The marker itself is not base64url, so a match is by construction the
+    /// start of its run — no predecessor check is needed.
+    fn collect_anchored(buffer: &[u8], marker: &[u8], tail_filter: bool, out: &mut Vec<String>) {
+        let span = marker.len() + TOKEN_LEN;
+        if buffer.len() < span {
+            return;
+        }
+        for i in 0..=buffer.len() - span {
+            if !buffer[i..].starts_with(marker) {
                 continue;
             }
-            // Every byte passed the base64url table, so the slice is ASCII.
-            match std::str::from_utf8(&buffer[i..end]) {
-                Ok(token) => out.push(token.to_string()),
-                Err(_) => continue,
+            let start = i + marker.len();
+            let end = start + TOKEN_LEN;
+            if !shaped(buffer, start, end) {
+                continue;
             }
+            if end < buffer.len() && BASE64URL[buffer[end] as usize] {
+                continue;
+            }
+            accepted(buffer, start, end, tail_filter, out);
+        }
+    }
+
+    /// True when every byte of `buffer[start..end]` is base64url.
+    fn shaped(buffer: &[u8], start: usize, end: usize) -> bool {
+        (start..end).all(|at| BASE64URL[buffer[at] as usize])
+    }
+
+    /// Apply the tail filter and push the token when it passes.
+    fn accepted(
+        buffer: &[u8],
+        start: usize,
+        end: usize,
+        tail_filter: bool,
+        out: &mut Vec<String>,
+    ) {
+        if tail_filter && !TAIL[buffer[end - 1] as usize] {
+            return;
+        }
+        // Every byte passed the base64url table, so the slice is ASCII.
+        if let Ok(token) = std::str::from_utf8(&buffer[start..end]) {
+            out.push(token.to_string());
         }
     }
 
@@ -326,8 +371,9 @@ mod imp {
         })
     }
 
-    /// Probe the candidates of one batch, skipping any already probed by another
-    /// worker. Returns the first candidate that verifies.
+    /// Probe the candidates of one batch on several lanes at once, skipping any
+    /// already probed by another worker. Returns the first candidate that
+    /// verifies; that hit stops the remaining lanes.
     fn probe_batch(
         batch: &[String],
         port: u16,
@@ -345,13 +391,40 @@ mod imp {
                 .cloned()
                 .collect()
         };
-        for candidate in fresh {
-            probed.fetch_add(1, Ordering::Relaxed);
-            if probe(&candidate, port) {
-                return Some(candidate);
-            }
+        if fresh.is_empty() {
+            return None;
         }
-        None
+
+        let winner: Mutex<Option<String>> = Mutex::new(None);
+        let stop = AtomicBool::new(false);
+        let next = AtomicUsize::new(0);
+        let lanes = fresh.len().min(PROBE_LANES);
+
+        std::thread::scope(|scope| {
+            for _ in 0..lanes {
+                scope.spawn(|| loop {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= fresh.len() {
+                        break;
+                    }
+                    probed.fetch_add(1, Ordering::Relaxed);
+                    if probe(&fresh[index], port) {
+                        stop.store(true, Ordering::Relaxed);
+                        if let Ok(mut slot) = winner.lock() {
+                            if slot.is_none() {
+                                *slot = Some(fresh[index].clone());
+                            }
+                        }
+                        break;
+                    }
+                });
+            }
+        });
+
+        winner.lock().ok().and_then(|mut slot| slot.take())
     }
 
     /// One full pass: enumerate, then read the regions on several threads,
@@ -359,6 +432,7 @@ mod imp {
     fn scan(
         process: &ProcessHandle,
         port: u16,
+        anchor: Option<&[u8]>,
         skip_images: bool,
         tail_filter: bool,
     ) -> (Option<String>, PassStats) {
@@ -450,7 +524,15 @@ mod imp {
                             };
                             if ok != 0 && read > 0 {
                                 scanned.fetch_add(read as u64, Ordering::Relaxed);
-                                collect(&buffer[..read], tail_filter, &mut batch);
+                                match anchor {
+                                    Some(marker) => collect_anchored(
+                                        &buffer[..read],
+                                        marker,
+                                        tail_filter,
+                                        &mut batch,
+                                    ),
+                                    None => collect_runs(&buffer[..read], tail_filter, &mut batch),
+                                }
                             }
                             if batch.len() >= BATCH_SIZE {
                                 candidates.fetch_add(batch.len(), Ordering::Relaxed);
@@ -488,9 +570,11 @@ mod imp {
         (hit, stats)
     }
 
-    /// Open the process and run the passes: mapped images first (they cannot
-    /// hold a JS string, so this pass reads roughly a fifth less memory), then
-    /// all of memory, then all of memory without the tail filter.
+    /// Open the process and run the passes, cheapest and most specific first:
+    /// the printed launch URL's `token=` anchor, then every maximal base64url
+    /// run over private memory (mapped images cannot hold a JS string, so that
+    /// pass reads roughly a fifth less), then the same over all of memory, and
+    /// finally without the tail filter.
     pub(super) fn recover(pid: u32, port: u16) -> Outcome {
         let raw = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) };
         if raw.is_null() {
@@ -502,11 +586,15 @@ mod imp {
         let handle = ProcessHandle(raw);
 
         let mut report: Vec<String> = Vec::new();
-        for (index, skip_images, tail_filter) in
-            [(0usize, true, true), (1, false, true), (2, false, false)]
-        {
-            let (hit, stats) = scan(&handle, port, skip_images, tail_filter);
-            report.push(format!("pass{} {stats}", index + 1));
+        for (index, anchor, skip_images, tail_filter) in [
+            (0usize, Some(TOKEN_ANCHOR), true, true),
+            (1, None, true, true),
+            (2, None, false, true),
+            (3, None, false, false),
+        ] {
+            let (hit, stats) = scan(&handle, port, anchor, skip_images, tail_filter);
+            let kind = if anchor.is_some() { "anchor" } else { "runs" };
+            report.push(format!("pass{}[{kind}] {stats}", index + 1));
             if let Some(token) = hit {
                 return Outcome::Found {
                     token,
