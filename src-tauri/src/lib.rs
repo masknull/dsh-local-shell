@@ -11,7 +11,7 @@ mod wproc;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, WindowEvent,
+    AppHandle, Manager, WindowEvent,
 };
 
 /// AppUserModelID stamped on toasts; must match the registry registration in
@@ -250,16 +250,12 @@ pub(crate) fn main_hwnd(app: &AppHandle) -> Option<*const core::ffi::c_void> {
     })
 }
 
-/// In-event-handler frame recompose: pure Win32, no Tauri dispatch, so it is
-/// safe to call from inside `on_window_event` (the main thread). The
-/// `SWP_FRAMECHANGED` path makes the window proc run WM_NCCALCSIZE /
-/// WM_WINDOWPOSCHANGED, which wry observes and re-lays-out against.
-///
 /// Force a full frame recompose of the window: `RedrawWindow` +
 /// `SWP_FRAMECHANGED` repaint the native frame (the transparent-caption /
-/// black-taskbar case), and on dispatch-safe paths a same-value
-/// `set_outer_size` round-trip makes wry re-send the webview bounds, which
-/// re-presents the WebView2 surface. Cooldown-protected: focus flapping
+/// black-taskbar case). Pure Win32, no Tauri dispatch — safe from any
+/// thread, including inside `on_window_event`. The `SWP_FRAMECHANGED` path
+/// makes the window proc run WM_NCCALCSIZE / WM_WINDOWPOSCHANGED, which wry
+/// observes and re-lays-out against. Cooldown-protected: focus flapping
 /// (alt-tab repeatedly) must not turn this into a resize loop.
 #[cfg(windows)]
 fn nudge_window_frame(hwnd: *const core::ffi::c_void) {
@@ -315,22 +311,15 @@ fn nudge_window_frame(hwnd: *const core::ffi::c_void) {
     }
 }
 
-/// The full "window may be black" recovery on the main window: native frame
-/// recompose (RedrawWindow + SWP_FRAMECHANGED, repaints the transparent
-/// caption / black taskbar case) plus a same-value outer-size round-trip
-/// that makes wry re-send the WebView2 bounds, re-presenting the webview
-/// surface. Only called from paths that already issue Tauri window
-/// dispatches (show/set_focus) — the in-event-handler path uses the
-/// dispatch-free `nudge_window_frame` directly.
+/// The "window may be black" recovery: a native frame recompose
+/// (`RedrawWindow` + `SetWindowPos(SWP_FRAMECHANGED)`), which repaints the
+/// frame and drives the WM_NCCALCSIZE / WM_WINDOWPOSCHANGED path wry
+/// re-lays out against. Deliberately no Tauri window dispatch inside, so
+/// it is equally safe from the tray path and from `on_window_event`.
 #[cfg(windows)]
 fn recompose_main_frame(app: &AppHandle) {
     if let Some(hwnd) = main_hwnd(app) {
         nudge_window_frame(hwnd);
-    }
-    if let Some(window) = app.get_webview_window("main") {
-        if let Ok(size) = window.outer_size() {
-            let _ = window.set_outer_size(size);
-        }
     }
 }
 
@@ -788,9 +777,11 @@ pub fn run() {    tauri::Builder::default()
                 // a native frame recompose (rate-limited inside); deliberately
                 // dispatch-free so it is safe inside the event handler.
                 #[cfg(windows)]
-                if let WindowEvent::Focused(true) = event {
-                    if let Some(hwnd) = main_hwnd(window.app_handle()) {
-                        nudge_window_frame(hwnd);
+                if let WindowEvent::Focused(focused) = event {
+                    if *focused {
+                        if let Some(hwnd) = main_hwnd(window.app_handle()) {
+                            nudge_window_frame(hwnd);
+                        }
                     }
                 }
             }

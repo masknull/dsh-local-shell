@@ -25,7 +25,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
-use uuid::Uuid;
 
 const DSH_ORIGIN: &str = "http://127.0.0.1:3080";
 const DSH_BASE: &str = "http://127.0.0.1:3080";

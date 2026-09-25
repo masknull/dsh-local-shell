@@ -15,7 +15,7 @@ use std::path::Path;
 
 use tauri::AppHandle;
 
-use crate::dsh;
+// Note: `crate::dsh::…` is referenced by full path below; no `use` needed.
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 

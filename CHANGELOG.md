@@ -18,14 +18,14 @@
   - `log_tail`（整读日志文件,日志页每 2s 轮询一次）→ async + spawn_blocking,并且只 seek 到文件尾读最后 256KB（不再整读整解码）
 - **偶发黑屏:捕获 + 自恢复**（复现是偶发的,先把“看不见”变成“有记录”）:
   - `[hangwatch]`:setup 起一个独立线程,每 2s 对主窗口发 `SendMessageTimeout(WM_NULL)`（以 `GetLastError()==ERROR_TIMEOUT` 判定,而非返回值——WM_NULL 的结果本身就是 0）,消息泵停转 >2s 即写日志,附 listeners/窗口可见性快照,恢复时记录阻塞时长
-  - 窗口获得焦点与从托盘恢复时强制重组窗口表面:`RedrawWindow(RDW_INVALIDATE|RDW_INTERNALPAINT|RDW_UPDATENOW)` + `SetWindowPos(SWP_FRAMECHANGED)` 重绘原生边框(治标题栏透明/任务栏块黑),再同值 `set_outer_size` 让 wry 重下 WebView2 边界(治内容表面);1s 冷却,alt-tab 反复抖动不会变成 resize 循环
+  - 窗口获得焦点与从托盘恢复时强制重组窗口表面:`RedrawWindow(RDW_INVALIDATE|RDW_INTERNALPAINT|RDW_UPDATENOW)` + `SetWindowPos(SWP_FRAMECHANGED)` 重绘原生边框、驱动 WM_NCCALCSIZE/WM_WINDOWPOSCHANGED 让 wry 重排(纯 Win32、不走 Tauri 派发, 事件回调内也安全);1s 冷却,alt-tab 反复抖动不会成环
   - 依据:已有 WebView2Feedback 记录表明窗口在显示/激活/遮挡态切换时窗口表面呈现可能失败([#1077](https://github.com/MicrosoftEdge/WebView2Feedback/issues/1077)),渲染进程并不死——正对应“内容可点、框是黑的”
 
 Native restart path (netstat/taskkill removed) + UI-thread hygiene (root-cause fix for the black-frame freezes):
 
 - New `src-tauri/src/wproc.rs` (raw Win32 FFI, no dependencies): `GetExtendedTcpTable` replaces the per-restart `netstat` spawns (measured 311 ms cold on this machine), a Toolhelp32 snapshot + `TerminateProcess` walk replaces `taskkill /T`, and `OpenProcess(SYNCHRONIZE)` + `WaitForSingleObject` on the killed PIDs replaces the HTTP-poll wait — measured restart gap ("重启清理" → "启动尝试") drops from 6–20 s to an expected 1–2 s; the blind 1 s settle is now 250 ms
 - All four remaining synchronous commands that blocked the UI thread are off it now (`dsh_custom_path`, `app_full_restart`, `dsh_exit` → spawn_blocking; `log_tail` → async + tail-only 256 KB read). A blocked UI thread stops the window painting its own frame — black content, transparent caption, black taskbar preview — while the WebView2 content and the OS keep working, exactly the reported symptom
-- A `[hangwatch]` background thread probes the main window's message pump every 2 s (`SendMessageTimeout(WM_NULL)` with the `ERROR_TIMEOUT` check) and logs stalls with a state snapshot, so the sporadic occurrences become diagnosable; window activation / tray restore now force a frame recompose (`RedrawWindow` + `SWP_FRAMECHANGED` + same-size bounds round-trip), rate-limited to one per second
+- A `[hangwatch]` background thread probes the main window's message pump every 2 s (`SendMessageTimeout(WM_NULL)` with the `ERROR_TIMEOUT` check) and logs stalls with a state snapshot, so the sporadic occurrences become diagnosable; window activation / tray restore now force a native frame recompose (`RedrawWindow` + `SetWindowPos(SWP_FRAMECHANGED)`, pure Win32, no Tauri dispatch), rate-limited to one per second
 
 ## v2.0.6 — 2026-09-16
 
