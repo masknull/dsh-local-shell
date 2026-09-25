@@ -25,7 +25,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
-use uuid::Uuid;
 
 const DSH_ORIGIN: &str = "http://127.0.0.1:3080";
 const DSH_BASE: &str = "http://127.0.0.1:3080";
@@ -57,7 +56,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Local port the DSH web server listens on; also the anchor for finding an
 /// attached instance's PID at restart time.
-const DSH_PORT: u16 = 3080;
+pub(crate) const DSH_PORT: u16 = 3080;
 
 /// A DSH subprocess we spawned (and therefore own the lifecycle of).
 struct DshInner {
@@ -1331,20 +1330,12 @@ fn run_capture(program: &str, args: &[&str]) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// Pid currently listening on the DSH port.
+/// Pid currently listening on the DSH port. Native TCP-table lookup
+/// (`GetExtendedTcpTable`, microseconds, no helper process) — the old
+/// `netstat -ano -p tcp` spawn cost ~50–300 ms per call and sat on the
+/// restart critical path; see `wproc` for the full rationale.
 fn port_listener_pid() -> Option<u32> {
-    let mut command = Command::new("netstat");
-    command.args(["-ano", "-p", "tcp"]);
-    apply_no_window(&mut command);
-    let output = command.output().ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let suffix = format!(":{DSH_PORT}");
-    text.lines().find_map(|line| {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        (fields.len() >= 5 && fields[0] == "TCP" && fields[1].ends_with(&suffix) && fields[4] != "0")
-            .then(|| fields[4].parse::<u32>().ok())
-            .flatten()
-    })
+    crate::wproc::listener_pids(DSH_PORT).into_iter().next()
 }
 
 /// Who owns the DSH port: pid, command line, and whether the parent chain
@@ -1390,14 +1381,42 @@ fn profile_plugin_versions() -> Value {
 }
 
 /// Last `n` lines of the shared shell log for the console pane.
+///
+/// Tail read, not a full `read_to_string`: the log tab polls this every 2 s,
+/// and while it was a *synchronous* Tauri command the whole (growing) file
+/// was decoded on the UI thread. Now it is async as well, but reading only
+/// the last 256 KB keeps even the fallback cost trivial.
 pub(crate) fn log_tail(n: usize) -> Vec<String> {
-    std::fs::read_to_string(log_path())
-        .map(|text| {
-            let lines: Vec<&str> = text.lines().collect();
-            let start = lines.len().saturating_sub(n);
-            lines[start..].iter().map(|l| l.to_string()).collect()
-        })
-        .unwrap_or_default()
+    use std::io::{Read, Seek, SeekFrom};
+
+    const TAIL_BYTES: u64 = 256 * 1024;
+    let Ok(mut file) = std::fs::File::open(log_path()) else {
+        return Vec::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(TAIL_BYTES);
+    let mut bytes = Vec::new();
+    if start > 0 && file.seek(SeekFrom::Start(start)).is_err() {
+        bytes.clear();
+        // Seek failed: fall back to a full read (rare, same as the old code).
+        if std::io::Seek::seek(&mut file, SeekFrom::Start(0)).is_ok() {
+            let _ = file.read_to_end(&mut bytes);
+        }
+    } else {
+        let _ = file.read_to_end(&mut bytes);
+    }
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if start > 0 {
+        // The 256 KB boundary likely lands mid-line; drop the partial first
+        // line so the viewer never shows a truncated entry.
+        match text.find('\n') {
+            Some(nl) => text = text[nl + 1..].to_string(),
+            None => text = String::new(),
+        }
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let skip = lines.len().saturating_sub(n);
+    lines[skip..].iter().map(|l| l.to_string()).collect()
 }
 
 /// Total bytes under `dir`, bounded: the walk stops counting past 50k files
@@ -1776,27 +1795,32 @@ pub fn cold_start(app: AppHandle) {
 }
 
 /// Kill any process still listening on the DSH port: an attached instance we
-/// never spawned, or a straggler the owned-tree taskkill missed. Locale-safe:
-/// matches the numeric local-address column, not the state text.
+/// never spawned, or a straggler the owned-tree kill missed. Native TCP table
+/// (no `netstat` spawn) + native tree kill, each recorded in
+/// `PENDING_EXIT_PIDS` so `wait_for_backend_stop` can wait on the exact
+/// processes instead of polling the port table on a timer.
 fn kill_port_listeners() {
-    let mut command = Command::new("netstat");
-    command.args(["-ano", "-p", "tcp"]);
-    apply_no_window(&mut command);
-    let Ok(output) = command.output() else {
-        return;
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    let suffix = format!(":{DSH_PORT}");
-    for line in text.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() >= 5
-            && fields[0] == "TCP"
-            && fields[1].ends_with(&suffix)
-            && fields[4] != "0"
-        {
-            if let Ok(pid) = fields[4].parse::<u32>() {
-                kill_tree(pid);
-            }
+    for pid in crate::wproc::listener_pids(DSH_PORT) {
+        if pid == std::process::id() {
+            continue; // paranoia: never the shell itself
+        }
+        supervision_log(&format!("[backend] 清理 {DSH_PORT} 监听进程 pid {pid}"));
+        pending_exit_push(pid);
+        kill_tree(pid);
+    }
+}
+
+/// PIDs a teardown/restart must observe exiting before a fresh backend
+/// spawns: the owned child (`teardown`) plus any 3080 listener cleared on the
+/// way (`kill_port_listeners`, attached instances included). Drained by
+/// `wait_for_backend_stop`, which then blocks on each process handle — a
+/// kernel-signalled wait replaces the old port-table poll loop.
+static PENDING_EXIT_PIDS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+fn pending_exit_push(pid: u32) {
+    if let Ok(mut guard) = PENDING_EXIT_PIDS.lock() {
+        if !guard.contains(&pid) {
+            guard.push(pid);
         }
     }
 }
@@ -1806,24 +1830,46 @@ fn kill_port_listeners() {
 /// the old dsh process tree (usage-billing writer, cordis children, …) takes
 /// a few seconds to tear down, and a too-early relaunch makes the fresh dsh
 /// web crash on leftover state (double usage-billing writer, TIME_WAIT port,
-/// held lock files). Condition-based, not a blind fixed sleep: we proceed the
-/// moment the port is confirmed clear.
+/// held lock files).
+///
+/// Native and condition-based (v2.0.7 rework, the old version spawned
+/// `netstat` every 300 ms and did HTTP probes with a 3 s timeout):
+///   1. block on the killed PIDs' process handles — exact, instant wake-up;
+///   2. poll the native TCP table until 3080 has no listener (fallback for
+///      anything the killed set did not cover);
+///   3. a short settle so the rest of the tree unwinds and lock files clear.
 fn wait_for_backend_stop() {
-    // 1) Wait for the port to stop answering (the old server's dying window).
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while probe_ready_once() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(400));
+    // 1) Exact waits on the PIDs recorded by teardown/kill_port_listeners.
+    let mut pending: Vec<u32> = PENDING_EXIT_PIDS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .drain(..)
+        .collect();
+    pending.sort_unstable();
+    pending.dedup();
+    let budget = Instant::now() + Duration::from_secs(8);
+    for pid in pending {
+        if pid == std::process::id() {
+            continue;
+        }
+        let left = budget.saturating_duration_since(Instant::now());
+        if !crate::wproc::wait_exit(pid, left) {
+            supervision_warn(&format!(
+                "[backend] pid {pid} 在退出预算内未消失, 交由端口轮询兜底"
+            ));
+        }
     }
-    // 2) Wait for no process to be listening on 3080 — the old listener has
-    //    been killed by `kill_port_listeners`; this polls until the tree is
-    //    reaped. Condition-based: if the tree exits fast we proceed fast.
-    let settle = Instant::now() + Duration::from_secs(8);
-    while port_listener_pid().is_some() && Instant::now() < settle {
-        std::thread::sleep(Duration::from_millis(300));
+    // 2) Native listener poll (microseconds per look) — catches foreign
+    //    instances, access-denied kills, and late-comers.
+    let settle = Instant::now() + Duration::from_secs(6);
+    while !crate::wproc::listener_pids(DSH_PORT).is_empty() && Instant::now() < settle {
+        std::thread::sleep(Duration::from_millis(50));
     }
-    // 3) Short settle so the rest of the tree (usage-billing writer, cordis
-    //    children, …) finishes unwinding + TIME_WAIT/lock files clear.
-    std::thread::sleep(Duration::from_millis(1000));
+    // 3) Short settle: usage-billing writer / cordis children unwind,
+    //    TIME_WAIT and lock files clear. The condition above already covers
+    //    the port itself; 250 ms is enough for the rest of the tree (was a
+    //    blind 1000 ms).
+    std::thread::sleep(Duration::from_millis(250));
 }
 
 /// Tear down the owned subprocess tree (if we spawned one). Safe to call from
@@ -1833,9 +1879,13 @@ pub fn teardown(app: &AppHandle) {
     let state = app.state::<DshState>();
     let mut guard = state.inner.lock().unwrap();
     if let Some(inner) = guard.take() {
-        // Child::kill only reaps the cmd shim on Windows; taskkill /T kills the
-        // whole node tree so no orphan keeps holding 3080. The supervisor
-        // thread reaps the Child and stays quiet (intentional stop).
+        // `Child` only reaps the cmd shim on Windows; the native tree kill
+        // (Toolhelp32 snapshot + TerminateProcess, replaces `taskkill /T`)
+        // walks the whole `cmd → node → usage-writer/cordis` tree so no
+        // orphan keeps holding 3080. The supervisor thread reaps the Child
+        // and stays quiet (intentional stop). The PID is recorded first so
+        // `wait_for_backend_stop` can block on its exit handle exactly.
+        pending_exit_push(inner.pid);
         kill_tree(inner.pid);
     }
 }
@@ -2008,13 +2058,12 @@ fn log_path() -> std::path::PathBuf {
     shell_data_dir().join("dsh.log")
 }
 
-/// Kill a process *tree* by root PID. `cmd /C …` → node is a grandchild; `/T`
-/// walks the tree so nothing survives on 3080.
+/// Kill a process *tree* by root PID. `cmd /C …` → node is a grandchild, so
+/// the whole subtree must go or an orphan keeps holding 3080. Native
+/// Toolhelp32 snapshot + TerminateProcess — no `taskkill` spawn (each spawn
+/// was ~150–300 ms on the restart path). See `wproc`.
 fn kill_tree(pid: u32) {
-    let mut command = Command::new("taskkill");
-    command.args(["/PID", &pid.to_string(), "/T", "/F"]);
-    apply_no_window(&mut command);
-    let _ = command.status();
+    crate::wproc::kill_tree(pid);
 }
 
 #[cfg(windows)]

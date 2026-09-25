@@ -6,11 +6,12 @@ mod memtok;
 mod menu;
 mod monitor;
 mod update;
+mod wproc;
 
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, WindowEvent,
+    AppHandle, Manager, WindowEvent,
 };
 
 /// AppUserModelID stamped on toasts; must match the registry registration in
@@ -67,9 +68,14 @@ fn open_path(app: AppHandle, path: String) {
 }
 
 /// Tail of the shared dsh.log for the log tab of the secondary panel.
+/// async + spawn_blocking: the log tab polls every 2 s; a synchronous command
+/// would read the whole growing file on the UI thread (the window's message
+/// pump starves → black/frozen frame while the OS stays responsive).
 #[tauri::command]
-fn log_tail(lines: usize) -> Vec<String> {
-    dsh::log_tail(lines.clamp(50, 1000))
+async fn log_tail(lines: usize) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || dsh::log_tail(lines.clamp(50, 1000)))
+        .await
+        .unwrap_or_default()
 }
 
 /// Panel「重启」: restart the dsh web backend (same flow as the tray entry —
@@ -84,7 +90,10 @@ fn dsh_restart_backend(app: AppHandle) {
 /// owned DSH torn down — the new instance re-runs the whole chain.
 #[tauri::command]
 fn app_full_restart(app: AppHandle) {
-    update::restart_app(&app);
+    // Off the UI thread: restart_app runs the full stop_backend (teardown +
+    // 3080 cleanup + waits) before exiting, which used to starve the window's
+    // message pump for the duration.
+    tauri::async_runtime::spawn_blocking(move || update::restart_app(&app));
 }
 
 /// One-paste AI context: env facts + this session's log as a markdown
@@ -140,16 +149,25 @@ async fn diagnostic_export(app: AppHandle) -> Result<serde_json::Value, String> 
 
 /// Frontend-invoked custom dsh path from the notfound dialog: validates it
 /// exists, persists it, and retries startup with it leading the chain.
+/// async + spawn_blocking: `set_custom_path` runs the same cleanup + wait as a
+/// full restart (stop_backend + wait_for_backend_stop — seconds on a bad
+/// day); as a synchronous command that ran on the UI thread and froze the
+/// window for the entire wait (black frame, message pump starved).
 #[tauri::command]
-fn dsh_custom_path(app: AppHandle, path: String) -> Result<(), String> {
-    dsh::set_custom_path(&app, path)
+async fn dsh_custom_path(app: AppHandle, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || dsh::set_custom_path(&app, path))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Frontend-invoked exit from the notfound choice.
 #[tauri::command]
 fn dsh_exit(app: AppHandle) {
-    dsh::teardown(&app);
-    app.exit(0);
+    // Off the UI thread: teardown walks the whole backend tree.
+    tauri::async_runtime::spawn_blocking(move || {
+        dsh::teardown(&app);
+        app.exit(0);
+    });
 }
 
 // --- Titlebar window controls, as app commands. The frontend window-plugin
@@ -206,7 +224,207 @@ pub(crate) fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.set_focus();
+        // WebView2's window-surface presentation can fail across
+        // show/activate transitions (the reported symptom: window content
+        // black, caption bar transparent, taskbar preview black — while the
+        // webview content stays visible and clickable and the OS never
+        // stalls). Force a frame recompose; rate-limited by the cooldown
+        // inside `nudge_window_frame`.
+        recompose_main_frame(app);
     }
+}
+
+/// Main-window HWND as a raw pointer, or None when unavailable. The window
+/// is owned by the AppHandle for the app's lifetime, so the HWND stays valid
+/// for any caller that runs while the app lives.
+#[cfg(windows)]
+pub(crate) fn main_hwnd(app: &AppHandle) -> Option<*const core::ffi::c_void> {
+    use raw_window_handle::HasWindowHandle;
+    let window = app.get_webview_window("main")?;
+    // WindowHandle borrows window; resolve the raw pointer inside the closure.
+    window.window_handle().ok().and_then(|h| match h.as_raw() {
+        raw_window_handle::RawWindowHandle::Win32(wh) => {
+            Some(wh.hwnd.get() as *const core::ffi::c_void)
+        }
+        _ => None,
+    })
+}
+
+/// Force a full frame recompose of the window: `RedrawWindow` +
+/// `SWP_FRAMECHANGED` repaint the native frame (the transparent-caption /
+/// black-taskbar case). Pure Win32, no Tauri dispatch — safe from any
+/// thread, including inside `on_window_event`. The `SWP_FRAMECHANGED` path
+/// makes the window proc run WM_NCCALCSIZE / WM_WINDOWPOSCHANGED, which wry
+/// observes and re-lays-out against. Cooldown-protected: focus flapping
+/// (alt-tab repeatedly) must not turn this into a resize loop.
+#[cfg(windows)]
+fn nudge_window_frame(hwnd: *const core::ffi::c_void) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn RedrawWindow(
+            hwnd: *const core::ffi::c_void,
+            lprc_update: *const core::ffi::c_void,
+            hrgn_update: *const core::ffi::c_void,
+            flags: u32,
+        ) -> i32;
+        fn SetWindowPos(
+            hwnd: *const core::ffi::c_void,
+            hwnd_insert_after: *const core::ffi::c_void,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            u_flags: u32,
+        ) -> i32;
+    }
+    const RDW_INVALIDATE: u32 = 0x0001;
+    const RDW_INTERNALPAINT: u32 = 0x0002;
+    const RDW_UPDATENOW: u32 = 0x0100;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+
+    let now = unix_millis();
+    static LAST_NUDGE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let previous = LAST_NUDGE_MS.swap(now, std::sync::atomic::Ordering::Relaxed);
+    if previous != 0 && now.saturating_sub(previous) < 1_000 {
+        return; // cooldown: at most one recompose per second
+    }
+    unsafe {
+        RedrawWindow(
+            hwnd,
+            core::ptr::null(),
+            core::ptr::null(),
+            RDW_INVALIDATE | RDW_INTERNALPAINT | RDW_UPDATENOW,
+        );
+        SetWindowPos(
+            hwnd,
+            core::ptr::null(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+}
+
+/// The "window may be black" recovery: a native frame recompose
+/// (`RedrawWindow` + `SetWindowPos(SWP_FRAMECHANGED)`), which repaints the
+/// frame and drives the WM_NCCALCSIZE / WM_WINDOWPOSCHANGED path wry
+/// re-lays out against. Deliberately no Tauri window dispatch inside, so
+/// it is equally safe from the tray path and from `on_window_event`.
+#[cfg(windows)]
+fn recompose_main_frame(app: &AppHandle) {
+    if let Some(hwnd) = main_hwnd(app) {
+        nudge_window_frame(hwnd);
+    }
+}
+
+#[cfg(not(windows))]
+fn recompose_main_frame(_app: &AppHandle) {}
+
+#[cfg(windows)]
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Watchdog for the sporadic black-frame/frozen-window reports. Samples every
+/// 2 s whether the main window's thread is still pumping its message queue
+/// (a `SendMessageTimeout(WM_NULL)` round-trip — the same idea behind
+/// Windows' own "not responding" classification). A window whose pump stops
+/// stops painting its own frame — content black, caption transparent,
+/// taskbar preview black — even while the WebView2 content and every other
+/// app keep working, which matches the report exactly. Runs on its own
+/// thread and only writes to the shell log, so an occurrence is captured
+/// with timestamps even when nobody is in front of the machine.
+#[cfg(windows)]
+fn spawn_hang_watchdog(app: &AppHandle) {
+    use std::time::Duration;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn SendMessageTimeoutW(
+            hwnd: *const core::ffi::c_void,
+            msg: u32,
+            wparam: usize,
+            lparam: isize,
+            fu_flags: u32,
+            u_timeout: u32,
+            pdw_result: *mut usize,
+        ) -> isize;
+    }
+    // kernel32 exports; the windows std preludes usually resolve them, but
+    // name the import lib explicitly (the LNK2019 lesson from the user32 FFI).
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetLastError() -> u32;
+        fn SetLastError(dw_err_code: u32);
+    }
+    const WM_NULL: u32 = 0x0000;
+    const SMTO_NORMAL: u32 = 0x0000;
+    const SMTO_ABORTIFHUNG: u32 = 0x0002;
+    const ERROR_TIMEOUT: u32 = 1460;
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STALL_SINCE_MS: AtomicU64 = AtomicU64::new(0); // 0 = pumping normally
+
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(2));
+        let Some(hwnd) = main_hwnd(&app) else {
+            continue;
+        };
+        let mut result: usize = 0;
+        // WM_NULL's window-procedure result is always 0, so the *return
+        // value* says nothing; a stall is precisely identified by
+        // GetLastError() == ERROR_TIMEOUT after the send.
+        unsafe { SetLastError(0) };
+        let sent = unsafe {
+            SendMessageTimeoutW(
+                hwnd,
+                WM_NULL,
+                0,
+                0,
+                SMTO_NORMAL | SMTO_ABORTIFHUNG,
+                2_000,
+                &mut result,
+            )
+        };
+        let timed_out = sent == 0 && unsafe { GetLastError() } == ERROR_TIMEOUT;
+        if !timed_out {
+            let since = STALL_SINCE_MS.swap(0, Ordering::Relaxed);
+            if since != 0 {
+                dsh::log_write(
+                    dsh::LogLevel::Warn,
+                    &format!(
+                        "[hangwatch] 主窗口消息泵恢复(阻塞约 {} ms)",
+                        unix_millis().saturating_sub(since)
+                    ),
+                );
+            }
+            continue;
+        }
+        // Pump stalled past the 2 s timeout.
+        if STALL_SINCE_MS.swap(unix_millis(), Ordering::Relaxed) == 0 {
+            let listeners = wproc::listener_pids(dsh::DSH_PORT);
+            let visible = app
+                .get_webview_window("main")
+                .and_then(|w| w.is_visible().ok())
+                .unwrap_or(false);
+            dsh::log_write(
+                dsh::LogLevel::Warn,
+                &format!(
+                    "[hangwatch] 主窗口消息泵 >2s 无响应(UI 线程阻塞) —— 黑屏/透明标题栏的直接嫌疑; winVisible={visible}, listeners={listeners:?}"
+                ),
+            );
+        }
+    });
 }
 
 /// Quit path: tear down our DSH subprocess tree, then exit. Attached mode tears
@@ -537,6 +755,8 @@ pub fn run() {    tauri::Builder::default()
             std::thread::spawn(move || dsh::cold_start(lifecycle));
             let monitor_app = app.handle().clone();
             std::thread::spawn(move || monitor::run(monitor_app));
+            #[cfg(windows)]
+            spawn_hang_watchdog(app.handle());
 
             // (改版) 自动自检更新与插件同步已禁用:本壳没有独立 Release
             // 渠道,也不允许任何自动覆盖/同步动作碰用户的 DSH 配置。
@@ -549,6 +769,20 @@ pub fn run() {    tauri::Builder::default()
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();
+                }
+                // Focus gained (alt-tab / taskbar click / tray restore):
+                // WebView2's window-surface presentation occasionally fails
+                // exactly across these transitions — black content with a
+                // transparent caption while the webview stays clickable. Force
+                // a native frame recompose (rate-limited inside); deliberately
+                // dispatch-free so it is safe inside the event handler.
+                #[cfg(windows)]
+                if let WindowEvent::Focused(focused) = event {
+                    if *focused {
+                        if let Some(hwnd) = main_hwnd(window.app_handle()) {
+                            nudge_window_frame(hwnd);
+                        }
+                    }
                 }
             }
         })
