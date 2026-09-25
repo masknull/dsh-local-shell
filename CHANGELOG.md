@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.0.7 — 2026-09-25
+
+**重启链路全面原生化（netstat/taskkill 退出重启路径）+ UI 线程卫生（黑屏/卡死根因修复）**:
+
+- **重启后端不再 spawn 任何外挂进程（新增 `src-tauri/src/wproc.rs`，零新依赖，内核态 FFI）**:
+  - `netstat -ano -p tcp`（每次重启发 1~N 次 spawn，本机实测单次 311ms 冷 / 44ms 热；`wait_for_backend_stop` 每 300ms 轮询一次、最坏 8s）→ 进程内 `GetExtendedTcpTable`（iphlpapi）读 LISTENING 表，微秒级，且天然忽略同端口大量 ESTABLISHED 行
+  - `taskkill /PID … /T /F` → `CreateToolhelp32Snapshot` 全进程快照 + BFS 收子树 + `OpenProcess`/`TerminateProcess`，无 spawn（安全护栏：永不杀自身与 pid≤4）
+  - “等端口停止应答”的 HTTP 探测轮询（每 400ms、单次最坏 3s 超时、上限 10s）→ 对 teardown/清端口记录的被杀 PID 直接 `OpenProcess(SYNCHRONIZE)` + `WaitForSingleObject`，进程一退出即刻唤醒
+  - 固定 settle 1000ms → 250ms（端口清空由条件判定覆盖）；端口表兜底轮询 300ms → 50ms（原生查表零成本）
+  - 实测基线（dsh.log“重启清理→启动尝试”间隔）：旧 **6~20s** → 预期 **1~2s**
+  - 非 Windows 保留 netstat/taskkill 回落实现（cfg 分支），CI 仅构建 Windows 不变
+- **UI 线程卫生（黑屏/卡死的直接根因）**:Tauri v2 同步命令的函数体跑在主线程（wry 事件循环）上,阻塞即冻结窗口——消息泵停转 → 窗口表面黑屏/标题栏透明/任务栏预览黑,而 WebView2 内容仍在、可点击,系统与其它应用毫无感知,与用户反馈完全吻合。此前 `env_info`/`dsh_npm_probe`/`diagnostic_export` 已 async 化,漏网的三处全在重启/退出路径上:
+  - `dsh_custom_path`（同步跑完整套 stop_backend + wait_for_backend_stop,最坏 ~19s）→ async + spawn_blocking
+  - `app_full_restart`（UI 线程执行 stop_backend 后才 exit）→ spawn_blocking
+  - `dsh_exit`（UI 线程 teardown 整树杀）→ spawn_blocking
+  - `log_tail`（整读日志文件,日志页每 2s 轮询一次）→ async + spawn_blocking,并且只 seek 到文件尾读最后 256KB（不再整读整解码）
+- **偶发黑屏:捕获 + 自恢复**（复现是偶发的,先把“看不见”变成“有记录”）:
+  - `[hangwatch]`:setup 起一个独立线程,每 2s 对主窗口发 `SendMessageTimeout(WM_NULL)`（以 `GetLastError()==ERROR_TIMEOUT` 判定,而非返回值——WM_NULL 的结果本身就是 0）,消息泵停转 >2s 即写日志,附 listeners/窗口可见性快照,恢复时记录阻塞时长
+  - 窗口获得焦点与从托盘恢复时强制重组窗口表面:`RedrawWindow(RDW_INVALIDATE|RDW_INTERNALPAINT|RDW_UPDATENOW)` + `SetWindowPos(SWP_FRAMECHANGED)` 重绘原生边框(治标题栏透明/任务栏块黑),再同值 `set_outer_size` 让 wry 重下 WebView2 边界(治内容表面);1s 冷却,alt-tab 反复抖动不会变成 resize 循环
+  - 依据:已有 WebView2Feedback 记录表明窗口在显示/激活/遮挡态切换时窗口表面呈现可能失败([#1077](https://github.com/MicrosoftEdge/WebView2Feedback/issues/1077)),渲染进程并不死——正对应“内容可点、框是黑的”
+
+Native restart path (netstat/taskkill removed) + UI-thread hygiene (root-cause fix for the black-frame freezes):
+
+- New `src-tauri/src/wproc.rs` (raw Win32 FFI, no dependencies): `GetExtendedTcpTable` replaces the per-restart `netstat` spawns (measured 311 ms cold on this machine), a Toolhelp32 snapshot + `TerminateProcess` walk replaces `taskkill /T`, and `OpenProcess(SYNCHRONIZE)` + `WaitForSingleObject` on the killed PIDs replaces the HTTP-poll wait — measured restart gap ("重启清理" → "启动尝试") drops from 6–20 s to an expected 1–2 s; the blind 1 s settle is now 250 ms
+- All four remaining synchronous commands that blocked the UI thread are off it now (`dsh_custom_path`, `app_full_restart`, `dsh_exit` → spawn_blocking; `log_tail` → async + tail-only 256 KB read). A blocked UI thread stops the window painting its own frame — black content, transparent caption, black taskbar preview — while the WebView2 content and the OS keep working, exactly the reported symptom
+- A `[hangwatch]` background thread probes the main window's message pump every 2 s (`SendMessageTimeout(WM_NULL)` with the `ERROR_TIMEOUT` check) and logs stalls with a state snapshot, so the sporadic occurrences become diagnosable; window activation / tray restore now force a frame recompose (`RedrawWindow` + `SWP_FRAMECHANGED` + same-size bounds round-trip), rate-limited to one per second
+
 ## v2.0.6 — 2026-09-16
 
 **复用(attach)实例不再卡在「是否重启接管」:从运行中的进程内存里取回 launch token**:
