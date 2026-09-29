@@ -195,11 +195,21 @@ fn window_toggle_maximize(app: AppHandle) {
 }
 
 /// Same path as the native X would take: CloseRequested → hide to tray.
+///
+/// async + spawn_blocking: `close()` is the one window operation Tauri's own
+/// maintainers single out as needing a separate thread. As a synchronous
+/// command it ran on the UI thread and dispatched a close back into that same
+/// thread. (The close itself is handled by `on_window_event`, which turns it
+/// into a hide-to-tray.)
 #[tauri::command]
-fn window_close(app: AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.close();
-    }
+async fn window_close(app: AppHandle) {
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.close();
+        }
+    })
+    .await
+    .ok();
 }
 
 /// Titlebar drag: invoked on mousedown in the drag strip. The OS caption
@@ -234,29 +244,111 @@ pub(crate) fn show_main_window(app: &AppHandle) {
     }
 }
 
-/// Main-window HWND as a raw pointer, or None when unavailable. The window
-/// is owned by the AppHandle for the app's lifetime, so the HWND stays valid
-/// for any caller that runs while the app lives.
+/// The main window's HWND, resolved once and kept. The window lives for the
+/// whole app lifetime, so a cached raw handle never goes stale.
+///
+/// Resolution deliberately avoids `app.get_webview_window("main")`: that
+/// dispatches to the main thread and waits for the reply, so it deadlocks
+/// inside `on_window_event` (same thread) and stalls the hang watchdog on the
+/// one path where the main thread is known to be wedged. See
+/// [`main_hwnd_nodispatch`].
 #[cfg(windows)]
-pub(crate) fn main_hwnd(app: &AppHandle) -> Option<*const core::ffi::c_void> {
+static MAIN_HWND_CACHE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Cache the HWND from a window handle we already hold. Called at window-build
+/// time, where the handle is in hand — no dispatcher round trip, no guessing.
+#[cfg(windows)]
+pub(crate) fn cache_main_hwnd<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
     use raw_window_handle::HasWindowHandle;
-    let window = app.get_webview_window("main")?;
-    // WindowHandle borrows window; resolve the raw pointer inside the closure.
-    window.window_handle().ok().and_then(|h| match h.as_raw() {
-        raw_window_handle::RawWindowHandle::Win32(wh) => {
-            Some(wh.hwnd.get() as *const core::ffi::c_void)
+    if let Ok(h) = window.window_handle() {
+        if let raw_window_handle::RawWindowHandle::Win32(wh) = h.as_raw() {
+            MAIN_HWND_CACHE.store(wh.hwnd.get() as usize, std::sync::atomic::Ordering::Relaxed);
         }
-        _ => None,
-    })
+    }
 }
 
-/// Force a full frame recompose of the window: `RedrawWindow` +
-/// `SWP_FRAMECHANGED` repaint the native frame (the transparent-caption /
-/// black-taskbar case). Pure Win32, no Tauri dispatch — safe from any
-/// thread, including inside `on_window_event`. The `SWP_FRAMECHANGED` path
-/// makes the window proc run WM_NCCALCSIZE / WM_WINDOWPOSCHANGED, which wry
-/// observes and re-lays-out against. Cooldown-protected: focus flapping
-/// (alt-tab repeatedly) must not turn this into a resize loop.
+/// The HWND of THIS process's visible top-level window, found via Win32 rather
+/// than through Tauri.
+///
+/// Why not `app.get_webview_window("main")`: it dispatches to the main thread
+/// and waits, so it blocks inside `on_window_event` (same thread — a
+/// self-deadlock) and stalls the hang watchdog on the one path where the main
+/// thread is known to be wedged. EnumWindows is a plain read of the window
+/// manager's state and returns immediately in both cases. The shell owns a
+/// single top-level window, so the first visible one in our own process is it.
+#[cfg(windows)]
+pub(crate) fn find_own_main_hwnd() -> Option<*const core::ffi::c_void> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(
+            cb: unsafe extern "system" fn(*mut core::ffi::c_void, isize) -> i32,
+            lparam: isize,
+        ) -> i32;
+        fn GetWindowThreadProcessId(hwnd: *mut core::ffi::c_void, pid: *mut u32) -> u32;
+        fn IsWindowVisible(hwnd: *mut core::ffi::c_void) -> i32;
+        fn GetWindow(hwnd: *mut core::ffi::c_void, cmd: u32) -> *mut core::ffi::c_void;
+    }
+    const GW_OWNER: u32 = 4;
+
+    unsafe extern "system" fn visit(hwnd: *mut core::ffi::c_void, lparam: isize) -> i32 {
+        let out = lparam as *mut *mut core::ffi::c_void;
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        // Our own process, visible, and unowned (a real top-level window, not
+        // a tool window or dialog child).
+        if pid == std::process::id() && IsWindowVisible(hwnd) != 0 && GetWindow(hwnd, GW_OWNER).is_null() {
+            *out = hwnd;
+            return 0; // stop enumerating
+        }
+        1 // continue
+    }
+
+    let mut found: *mut core::ffi::c_void = core::ptr::null_mut();
+    unsafe { EnumWindows(visit, &mut found as *mut _ as isize) };
+    (!found.is_null()).then_some(found as *const core::ffi::c_void)
+}
+
+/// Resolve the main HWND: the cache when populated, else a Win32 lookup that
+/// never dispatches. Safe from any thread, including inside `on_window_event`
+/// and the watchdog's stall path.
+#[cfg(windows)]
+pub(crate) fn main_hwnd_nodispatch() -> Option<*const core::ffi::c_void> {
+    if let Some(hwnd) = main_hwnd_if_cached() {
+        return Some(hwnd);
+    }
+    let hwnd = find_own_main_hwnd()?;
+    MAIN_HWND_CACHE.store(hwnd as usize, std::sync::atomic::Ordering::Relaxed);
+    Some(hwnd)
+}
+
+/// Pure cache read — never calls into Tauri, so it is safe even inside
+/// `on_window_event`, where dispatching back to the main thread would block
+/// on the very thread that is executing the callback (a self-deadlock).
+#[cfg(windows)]
+pub(crate) fn main_hwnd_if_cached() -> Option<*const core::ffi::c_void> {
+    let cached = MAIN_HWND_CACHE.load(std::sync::atomic::Ordering::Relaxed);
+    (cached != 0).then(|| cached as *const core::ffi::c_void)
+}
+
+/// Force a full frame recompose of the window: `RedrawWindow` repaints both
+/// the client area and the native frame (the transparent-caption /
+/// black-taskbar case). Pure Win32, no Tauri dispatch — safe from any thread,
+/// including inside `on_window_event`.
+///
+/// Two corrections over the first version of this recovery:
+///
+///   * The cooldown used to write its timestamp *before* testing it
+///     (`LAST_NUDGE_MS.swap(now, ..)` then compare), so any sub-second churn
+///     — a pointer crossing the window, focus flapping — kept refreshing the
+///     timestamp and locked out the recompose exactly when a burst of events
+///     made it necessary. The stamp is now read first and only written when
+///     the nudge actually runs.
+///   * `SetWindowPos(SWP_FRAMECHANGED)` was dropped. Per MSDN it sends
+///     `WM_NCCALCSIZE` synchronously *even when the size is unchanged*, and
+///     `SetWindowPos` always sends `WM_WINDOWPOSCHANGED` — i.e. the rescue
+///     path was posting synchronous messages to the very thread it was
+///     supposed to rescue. `RedrawWindow` with `RDW_FRAME` repaints the frame
+///     without any such round trip.
 #[cfg(windows)]
 fn nudge_window_frame(hwnd: *const core::ffi::c_void) {
     #[link(name = "user32")]
@@ -267,60 +359,75 @@ fn nudge_window_frame(hwnd: *const core::ffi::c_void) {
             hrgn_update: *const core::ffi::c_void,
             flags: u32,
         ) -> i32;
-        fn SetWindowPos(
-            hwnd: *const core::ffi::c_void,
-            hwnd_insert_after: *const core::ffi::c_void,
-            x: i32,
-            y: i32,
-            cx: i32,
-            cy: i32,
-            u_flags: u32,
-        ) -> i32;
     }
     const RDW_INVALIDATE: u32 = 0x0001;
     const RDW_INTERNALPAINT: u32 = 0x0002;
     const RDW_UPDATENOW: u32 = 0x0100;
-    const SWP_NOSIZE: u32 = 0x0001;
-    const SWP_NOMOVE: u32 = 0x0002;
-    const SWP_NOZORDER: u32 = 0x0004;
-    const SWP_NOACTIVATE: u32 = 0x0010;
-    const SWP_FRAMECHANGED: u32 = 0x0020;
+    /// Repaint the non-client area (caption, border) too — the part that
+    /// actually goes transparent in the reported failure.
+    const RDW_FRAME: u32 = 0x0400;
+    /// Repaint every child window (the WebView2 host) as well.
+    const RDW_ALLCHILDREN: u32 = 0x0080;
 
     let now = unix_millis();
     static LAST_NUDGE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let previous = LAST_NUDGE_MS.swap(now, std::sync::atomic::Ordering::Relaxed);
+    // Read, decide, and only then claim the slot — the order matters.
+    let previous = LAST_NUDGE_MS.load(std::sync::atomic::Ordering::Relaxed);
     if previous != 0 && now.saturating_sub(previous) < 1_000 {
         return; // cooldown: at most one recompose per second
     }
+    LAST_NUDGE_MS.store(now, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         RedrawWindow(
             hwnd,
             core::ptr::null(),
             core::ptr::null(),
-            RDW_INVALIDATE | RDW_INTERNALPAINT | RDW_UPDATENOW,
-        );
-        SetWindowPos(
-            hwnd,
-            core::ptr::null(),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            RDW_INVALIDATE | RDW_INTERNALPAINT | RDW_UPDATENOW | RDW_FRAME | RDW_ALLCHILDREN,
         );
     }
 }
 
-/// The "window may be black" recovery: a native frame recompose
-/// (`RedrawWindow` + `SetWindowPos(SWP_FRAMECHANGED)`), which repaints the
-/// frame and drives the WM_NCCALCSIZE / WM_WINDOWPOSCHANGED path wry
-/// re-lays out against. Deliberately no Tauri window dispatch inside, so
-/// it is equally safe from the tray path and from `on_window_event`.
+/// The "window may be black" recovery, deferred until the window is actually
+/// mapped on screen.
+///
+/// `window.show()` dispatches to the event loop and returns immediately, so
+/// the previous code ran its repaint *before* the window had been shown:
+/// invalidating a window that is not yet on screen does nothing, and the
+/// no-op still consumed the cooldown slot — so by the time the window really
+/// appeared, the recovery was locked out. Waits off the UI thread (never
+/// blocking the message pump) until Win32 reports the window visible.
 #[cfg(windows)]
-fn recompose_main_frame(app: &AppHandle) {
-    if let Some(hwnd) = main_hwnd(app) {
-        nudge_window_frame(hwnd);
+fn recompose_main_frame(_app: &AppHandle) {
+    let Some(hwnd) = main_hwnd_nodispatch() else {
+        return;
+    };
+    // Cross the thread boundary as an integer: a raw pointer is not `Send`, so
+    // the handle is carried as `usize` and cast back inside the closure (the
+    // window outlives the thread, so the address stays valid).
+    let hwnd_addr = hwnd as usize;
+    std::thread::spawn(move || {
+        let hwnd = hwnd_addr as *const core::ffi::c_void;
+        // ~1 s budget: show() lands within a few frames in practice.
+        for _ in 0..25 {
+            if window_is_mapped(hwnd) {
+                nudge_window_frame(hwnd);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+    });
+}
+
+/// Win32 visibility read. Unlike Tauri's `is_visible()`, this never dispatches
+/// to the window's own thread, so it is safe to call while that thread is
+/// wedged (the watchdog depends on exactly that).
+#[cfg(windows)]
+fn window_is_mapped(hwnd: *const core::ffi::c_void) -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn IsWindowVisible(hwnd: *const core::ffi::c_void) -> i32;
     }
+    unsafe { IsWindowVisible(hwnd) != 0 }
 }
 
 #[cfg(not(windows))]
@@ -343,8 +450,18 @@ fn unix_millis() -> u64 {
 /// app keep working, which matches the report exactly. Runs on its own
 /// thread and only writes to the shell log, so an occurrence is captured
 /// with timestamps even when nobody is in front of the machine.
+///
+/// Every window read in here is deliberately pure Win32 (`EnumWindows`,
+/// `IsWindowVisible`) rather than a Tauri call: Tauri's window getters
+/// dispatch to the main thread and wait for the reply, which is the one
+/// thread this probe exists to observe while it is *not* answering. The
+/// earlier version asked Tauri for the window's visibility before logging,
+/// so it hung inside its own capture step and a real stall produced no log
+/// line at all — leaving "no [hangwatch] entries" indistinguishable from
+/// "no stall happened", which is exactly the ambiguity that let the bug
+/// survive several rounds of fixing.
 #[cfg(windows)]
-fn spawn_hang_watchdog(app: &AppHandle) {
+fn spawn_hang_watchdog(_app: &AppHandle) {
     use std::time::Duration;
 
     #[link(name = "user32")]
@@ -358,6 +475,9 @@ fn spawn_hang_watchdog(app: &AppHandle) {
             u_timeout: u32,
             pdw_result: *mut usize,
         ) -> isize;
+        /// Cheap window-state read; unlike Tauri's `is_visible()` it never
+        /// dispatches to (or blocks on) the window's own thread.
+        fn IsWindowVisible(hwnd: *const core::ffi::c_void) -> i32;
     }
     // kernel32 exports; the windows std preludes usually resolve them, but
     // name the import lib explicitly (the LNK2019 lesson from the user32 FFI).
@@ -373,56 +493,100 @@ fn spawn_hang_watchdog(app: &AppHandle) {
 
     use std::sync::atomic::{AtomicU64, Ordering};
     static STALL_SINCE_MS: AtomicU64 = AtomicU64::new(0); // 0 = pumping normally
+    /// Stall length (ms) already written to the log, so a long wedge is
+    /// reported at most every 10 s instead of once — the old code logged a
+    /// single line and then went silent, which made "stalled 3 s" and
+    /// "stalled until the user killed it" indistinguishable.
+    static LAST_STALL_LOG_MS: AtomicU64 = AtomicU64::new(0);
+    /// Sampling period; also the resolution of every stall measurement.
+    const SAMPLE_MS: u64 = 2_000;
+    /// Per-send timeout. Must stay below SAMPLE_MS so a stalled pump is
+    /// detected on the same tick rather than drifting a whole period behind.
+    const SEND_TIMEOUT_MS: u32 = 1_500;
+    /// Repeat a still-ongoing stall every 10 s instead of once.
+    const REPEAT_MS: u64 = 10_000;
 
-    let app = app.clone();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(2));
-        let Some(hwnd) = main_hwnd(&app) else {
-            continue;
-        };
-        let mut result: usize = 0;
-        // WM_NULL's window-procedure result is always 0, so the *return
-        // value* says nothing; a stall is precisely identified by
-        // GetLastError() == ERROR_TIMEOUT after the send.
-        unsafe { SetLastError(0) };
-        let sent = unsafe {
-            SendMessageTimeoutW(
-                hwnd,
-                WM_NULL,
-                0,
-                0,
-                SMTO_NORMAL | SMTO_ABORTIFHUNG,
-                2_000,
-                &mut result,
-            )
-        };
-        let timed_out = sent == 0 && unsafe { GetLastError() } == ERROR_TIMEOUT;
-        if !timed_out {
-            let since = STALL_SINCE_MS.swap(0, Ordering::Relaxed);
-            if since != 0 {
+    std::thread::spawn(move || {
+        // The HWND is resolved once and cached, with no Tauri dispatch: the
+        // probe's entire job is to run *while the UI thread is wedged*, so it
+        // must not depend on that thread answering. The window lives for the
+        // whole app lifetime, so the cached raw handle stays valid.
+        let mut cached_hwnd: usize = 0;
+        loop {
+            std::thread::sleep(Duration::from_millis(SAMPLE_MS));
+            if cached_hwnd == 0 {
+                match main_hwnd_nodispatch() {
+                    Some(hwnd) => cached_hwnd = hwnd as usize,
+                    None => continue, // window not built yet
+                }
+            }
+            let hwnd = cached_hwnd as *const core::ffi::c_void;
+            let mut result: usize = 0;
+            // WM_NULL's window-procedure result is always 0, so the *return
+            // value* says nothing; a stall is precisely identified by
+            // GetLastError() == ERROR_TIMEOUT after the send.
+            unsafe { SetLastError(0) };
+            let sent = unsafe {
+                SendMessageTimeoutW(
+                    hwnd,
+                    WM_NULL,
+                    0,
+                    0,
+                    SMTO_NORMAL | SMTO_ABORTIFHUNG,
+                    SEND_TIMEOUT_MS,
+                    &mut result,
+                )
+            };
+            let timed_out = sent == 0 && unsafe { GetLastError() } == ERROR_TIMEOUT;
+            let now = unix_millis();
+            if !timed_out {
+                let since = STALL_SINCE_MS.swap(0, Ordering::Relaxed);
+                if since != 0 {
+                    LAST_STALL_LOG_MS.store(0, Ordering::Relaxed);
+                    dsh::log_write(
+                        dsh::LogLevel::Warn,
+                        &format!(
+                            "[hangwatch] 主窗口消息泵恢复(本次阻塞共约 {} ms)",
+                            now.saturating_sub(since)
+                        ),
+                    );
+                }
+                continue;
+            }
+            // Pump stalled past the 2 s timeout. The probe only observes the
+            // state every 2 s, so the earliest moment the wedge can be dated
+            // is one sampling interval ago — reporting 0 ms here (the naive
+            // `swap`-based version) made a fresh stall look instantaneous.
+            //
+            // Log BEFORE touching any Tauri window API. The previous version
+            // called `w.is_visible()` first, which dispatches back to the very
+            // main thread that is wedged — so the probe hung inside its own
+            // capture step and the stall went unlogged. That is precisely why
+            // "no [hangwatch] lines in dsh.log" could never be read as "no
+            // stall happened": the probe's failure to report was itself the
+            // unmeasured case. Visibility now comes from Win32
+            // `IsWindowVisible`, which is a cheap read that never dispatches.
+            let since = STALL_SINCE_MS.load(Ordering::Relaxed);
+            let first = since == 0;
+            let stalled_ms = if first {
+                STALL_SINCE_MS.store(now.saturating_sub(SAMPLE_MS), Ordering::Relaxed);
+                SAMPLE_MS
+            } else {
+                now.saturating_sub(since)
+            };
+            let due = first
+                || stalled_ms.saturating_sub(LAST_STALL_LOG_MS.load(Ordering::Relaxed)) >= REPEAT_MS;
+            if due {
+                LAST_STALL_LOG_MS.store(stalled_ms, Ordering::Relaxed);
+                let visible = unsafe { IsWindowVisible(hwnd) } != 0;
+                let listeners = wproc::listener_pids(dsh::DSH_PORT);
                 dsh::log_write(
                     dsh::LogLevel::Warn,
                     &format!(
-                        "[hangwatch] 主窗口消息泵恢复(阻塞约 {} ms)",
-                        unix_millis().saturating_sub(since)
+                        "[hangwatch] 主窗口消息泵无响应至少 {stalled_ms} ms(UI 线程阻塞)——黑屏/透明标题栏的直接嫌疑; winVisible={visible}, listeners={listeners:?}"
                     ),
                 );
             }
-            continue;
-        }
-        // Pump stalled past the 2 s timeout.
-        if STALL_SINCE_MS.swap(unix_millis(), Ordering::Relaxed) == 0 {
-            let listeners = wproc::listener_pids(dsh::DSH_PORT);
-            let visible = app
-                .get_webview_window("main")
-                .and_then(|w| w.is_visible().ok())
-                .unwrap_or(false);
-            dsh::log_write(
-                dsh::LogLevel::Warn,
-                &format!(
-                    "[hangwatch] 主窗口消息泵 >2s 无响应(UI 线程阻塞) —— 黑屏/透明标题栏的直接嫌疑; winVisible={visible}, listeners={listeners:?}"
-                ),
-            );
         }
     });
 }
@@ -637,7 +801,7 @@ pub fn run() {    tauri::Builder::default()
             // links, window.open from the link menu) is handed to the system
             // default browser instead of being silently denied by wry.
             let opener_app = app.handle().clone();
-            tauri::WebviewWindowBuilder::new(
+            let main_window = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
                 tauri::WebviewUrl::App("index.html".into()),
@@ -709,6 +873,15 @@ pub fn run() {    tauri::Builder::default()
             })
             .build()?;
 
+            // Cache the HWND now: this still runs on the thread that owns the window,
+// so resolving the handle here is safe — and every later caller (hang
+// watchdog, on_window_event, tray) can then read the cache instead of
+// dispatching, which would block on a wedged or self-referential main thread.
+            #[cfg(windows)]
+            cache_main_hwnd(&main_window);
+            #[cfg(not(windows))]
+            let _ = &main_window;
+
             let open = MenuItem::with_id(app, "open", "打开主界面", true, None::<&str>)?;
             // Backend-only restart: relaunches the dsh web process, not the
             // app — the name says so explicitly now (it used to read "重启
@@ -779,7 +952,10 @@ pub fn run() {    tauri::Builder::default()
                 #[cfg(windows)]
                 if let WindowEvent::Focused(focused) = event {
                     if *focused {
-                        if let Some(hwnd) = main_hwnd(window.app_handle()) {
+                        // No-dispatch lookup: `main_hwnd` would post back to
+                        // the main thread from inside this very callback and
+                        // block on itself.
+                        if let Some(hwnd) = main_hwnd_nodispatch() {
                             nudge_window_frame(hwnd);
                         }
                     }
