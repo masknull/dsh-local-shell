@@ -401,7 +401,12 @@ fn recompose_main_frame(_app: &AppHandle) {
     let Some(hwnd) = main_hwnd_nodispatch() else {
         return;
     };
+    // Cross the thread boundary as an integer: a raw pointer is not `Send`, so
+    // the handle is carried as `usize` and cast back inside the closure (the
+    // window outlives the thread, so the address stays valid).
+    let hwnd_addr = hwnd as usize;
     std::thread::spawn(move || {
+        let hwnd = hwnd_addr as *const core::ffi::c_void;
         // ~1 s budget: show() lands within a few frames in practice.
         for _ in 0..25 {
             if window_is_mapped(hwnd) {
